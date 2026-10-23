@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-10-22:** project scaffold and database running; no agent code yet.
+**Status as of 2026-10-23:** database seeded with synthetic data; no agent code yet.
 
 ---
 
@@ -101,9 +101,9 @@ timesheet-exception-agent/
 - [x] Checkpoint 1.1 written (745 words)
 - [x] Repo created with uv and pushed to GitHub (private)
 - [x] Docker Desktop and WSL 2 set up; PostgreSQL + pgvector container running
-- [ ] Load `schema.sql` and confirm 10 tables
-- [ ] Verify Python connection (`uv run python -m timesheet_exception_agent.db.connection`)
-- [ ] Synthetic data generator: 1 state, 10 employees, 4 managers, 6–8 exceptions, personas
+- [x] Load `schema.sql` and confirm 10 tables
+- [x] Verify Python connection (`uv run python -m timesheet_exception_agent.db.connection`)
+- [x] Synthetic data generator (`uv run python -m timesheet_exception_agent.sim.seed`): 1 state (CO), 10 staff, 5 frontline + 2 next-level managers, 8 exceptions, all 6 personas; `tests/test_seed.py`
 - [ ] Simulated clock and persona-driven reply generator
 - [ ] Outreach tools (`get_exception`, `get_presence`, `get_next_level_manager`, `send_message`, `check_replies`, `update_status`, `get_time`)
 - [ ] Outreach agent with ReAct, plus the driver loop (Monday 8:00 → 10:00 AM in 10-minute steps)
@@ -127,3 +127,4 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Confirm the model provider used in the labs
 - Confirm exact weekly module deadlines
 - Week 3: decide pgvector only, or compare with Chroma for the design write-up
+- Seed uses 7 managers, not the 4 originally planned: each manager carries one persona, so covering all 6 personas needs at least 6
