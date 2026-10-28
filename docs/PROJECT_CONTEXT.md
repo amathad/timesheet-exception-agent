@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-10-23:** database seeded with synthetic data; no agent code yet.
+**Status as of 2026-10-28:** database seeded; simulated clock and persona reply generator built; no agent code yet.
 
 ---
 
@@ -104,7 +104,7 @@ timesheet-exception-agent/
 - [x] Load `schema.sql` and confirm 10 tables
 - [x] Verify Python connection (`uv run python -m timesheet_exception_agent.db.connection`)
 - [x] Synthetic data generator (`uv run python -m timesheet_exception_agent.sim.seed`): 1 state (CO), 10 staff, 5 frontline + 2 next-level managers, 8 exceptions, all 6 personas; `tests/test_seed.py`
-- [ ] Simulated clock and persona-driven reply generator
+- [x] Simulated clock and persona-driven reply generator (`sim/clock.py`, `sim/personas.py`; `tests/test_sim.py`)
 - [ ] Outreach tools (`get_exception`, `get_presence`, `get_next_level_manager`, `send_message`, `check_replies`, `update_status`, `get_time`)
 - [ ] Outreach agent with ReAct, plus the driver loop (Monday 8:00 → 10:00 AM in 10-minute steps)
 - [ ] 6–8 scenario tests with expected outcomes
@@ -137,3 +137,9 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Merged as PR #1 (squash, `e17467c`) into `master`.
 - **Next:** simulated clock and persona-driven reply generator (`sim/clock.py`, `sim/personas.py`), then the Outreach tools.
 - **Behind schedule:** the Week 3 module (RAG) closed Mon Oct 26; the Outreach agent planned for Week 2 isn't built yet.
+
+### 2026-10-28
+- Added `sim/clock.py`: `SimClock` (timezone-aware, America/Denver), starts Mon 2026-10-26 8:00 AM, 10-minute steps, constants `START`, `MANAGER_WINDOW`, `LOCK`, `END_OF_DAY`. Refuses naive times and moving backwards.
+- Added `sim/personas.py`: `ReplySimulator` schedules deterministic replies when a message is sent and releases them with `due(now)`. Delays: responsive 10 min, correction 15 min (asks for 72 h instead of 80), slow 75 min (misses the 30-minute next-level window), silent never. On-leave and no-next-level managers send an out-of-office auto-reply on email only (Teams relies on presence). One reply per person per exception; people without a persona (teammates) never reply. `overrides` switches a person to the `ambiguous` (looks like approval, isn't) or `injection` reply for failure-case tests. `load_personas` / `record_replies` read `sim_personas` and write received rows to `messages`.
+- `tests/test_sim.py`: 16 tests, pure Python (no DB). Full suite 23 passing.
+- **Next:** Outreach tools in `tools/`, wired to `SimClock` (`get_time`) and `ReplySimulator` (`send_message`, `check_replies`).
