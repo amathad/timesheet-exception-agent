@@ -128,3 +128,12 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Confirm exact weekly module deadlines
 - Week 3: decide pgvector only, or compare with Chroma for the design write-up
 - Seed uses 7 managers, not the 4 originally planned: each manager carries one persona, so covering all 6 personas needs at least 6
+
+## 7. Session log
+
+### 2026-10-23
+- Confirmed the schema was already loaded (10 tables) and the Python connection works.
+- Added `sim/seed.py` and `tests/test_seed.py` (7 passing). The seed wipes and reloads a fixed dataset each run. Scenario map: E-01/E-02 responsive manager; E-03/E-08 manager on leave, next level responds; E-04 silent manager, slow next level, history fallback; E-07 conflicting history (80 h vs 64 h); E-05 correction; E-06 new hire, no next level, team then standard hours.
+- Merged as PR #1 (squash, `e17467c`) into `master`.
+- **Next:** simulated clock and persona-driven reply generator (`sim/clock.py`, `sim/personas.py`), then the Outreach tools.
+- **Behind schedule:** the Week 3 module (RAG) closed Mon Oct 26; the Outreach agent planned for Week 2 isn't built yet.
