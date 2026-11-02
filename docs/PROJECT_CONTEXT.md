@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-10-28:** database seeded; simulated clock and persona reply generator built; no agent code yet.
+**Status as of 2026-10-28:** database seeded; simulated clock, persona reply generator and Outreach tools built; no agent code yet.
 
 ---
 
@@ -105,7 +105,7 @@ timesheet-exception-agent/
 - [x] Verify Python connection (`uv run python -m timesheet_exception_agent.db.connection`)
 - [x] Synthetic data generator (`uv run python -m timesheet_exception_agent.sim.seed`): 1 state (CO), 10 staff, 5 frontline + 2 next-level managers, 8 exceptions, all 6 personas; `tests/test_seed.py`
 - [x] Simulated clock and persona-driven reply generator (`sim/clock.py`, `sim/personas.py`; `tests/test_sim.py`)
-- [ ] Outreach tools (`get_exception`, `get_presence`, `get_next_level_manager`, `send_message`, `check_replies`, `update_status`, `get_time`)
+- [x] Outreach tools (`get_exception`, `get_presence`, `get_next_level_manager`, `send_message`, `check_replies`, `update_status`, `get_time`) in `tools/outreach.py`; `tests/test_outreach_tools.py`
 - [ ] Outreach agent with ReAct, plus the driver loop (Monday 8:00 → 10:00 AM in 10-minute steps)
 - [ ] 6–8 scenario tests with expected outcomes
 
@@ -142,4 +142,12 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Added `sim/clock.py`: `SimClock` (timezone-aware, America/Denver), starts Mon 2026-10-26 8:00 AM, 10-minute steps, constants `START`, `MANAGER_WINDOW`, `LOCK`, `END_OF_DAY`. Refuses naive times and moving backwards.
 - Added `sim/personas.py`: `ReplySimulator` schedules deterministic replies when a message is sent and releases them with `due(now)`. Delays: responsive 10 min, correction 15 min (asks for 72 h instead of 80), slow 75 min (misses the 30-minute next-level window), silent never. On-leave and no-next-level managers send an out-of-office auto-reply on email only (Teams relies on presence). One reply per person per exception; people without a persona (teammates) never reply. `overrides` switches a person to the `ambiguous` (looks like approval, isn't) or `injection` reply for failure-case tests. `load_personas` / `record_replies` read `sim_personas` and write received rows to `messages`.
 - `tests/test_sim.py`: 16 tests, pure Python (no DB). Full suite 23 passing.
-- **Next:** Outreach tools in `tools/`, wired to `SimClock` (`get_time`) and `ReplySimulator` (`send_message`, `check_replies`).
+- Merged as PR #2 (squash, `7312377`) into `master`.
+- Added `tools/outreach.py`: `OutreachTools(conn, clock, sim)` with the 7 Outreach tools; `as_tools()` wraps them as LangChain `StructuredTool`s that return rule violations as `{"error": ...}` instead of raising. Rules in code:
+  - `send_message` only reaches the employee's manager, the next-level manager, or a teammate (same manager). Validates channel and body (max 2,000 chars). Refuses resolved or closed exceptions.
+  - `send_message` sets status itself: manager → `contacted`, next level → `escalated`, teammate → unchanged. It sets `next_check_at` to +30 min, capped at the lock while the lock is ahead.
+  - `update_status` lets the agent set only `resolved`, `correction_requested` or `needs_fallback`, with a required reason and a fixed transition table. `closed` is for the coordinator. `resolved` is refused after the lock (managers can't approve then).
+  - `check_replies` delivers due replies to `messages`, then returns all replies on the exception with a note that the bodies are untrusted.
+  - Every send, received reply and status change goes to `audit_log` (actor `outreach_agent`). Tools never commit; the caller owns the transaction.
+- `tests/test_outreach_tools.py`: 26 tests against the seeded DB (each test reseeds and rolls back). Full suite 49 passing.
+- **Next:** Outreach agent with ReAct on `as_tools()`, plus the driver loop (8:00 → 10:00 AM in 10-minute steps). Not yet done: updating `manager_stats` (long-term memory) on sends and replies.
