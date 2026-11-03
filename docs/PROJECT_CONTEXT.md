@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-10-28:** database seeded; simulated clock, persona reply generator and Outreach tools built; no agent code yet.
+**Status as of 2026-11-02:** database seeded; simulated clock, persona reply generator, Outreach tools, and Outreach agent with driver loop built (tested with a scripted model; no live LLM run yet).
 
 ---
 
@@ -73,7 +73,7 @@ The workflow was described by a practicing payroll coordinator. **All project da
 | Tools | Mock tools; exposed through an MCP server in Week 4 |
 | Simulation | Simulated clock (no real waiting); manager personas: responsive, on_leave, slow, correction, silent, no_next_level |
 | Evaluation | LangSmith tracing, Rebuff for prompt injection, scenario tests vs. a fixed-reminder baseline |
-| Model provider | Match whatever the course labs use (to confirm) |
+| Model provider | Claude (Anthropic API) via `langchain-anthropic`; code default `claude-opus-5-5`; the local `.env` sets `LLM_MODEL=anthropic:claude-haiku-5-5` for cost (about $0.05 per run). Needs a Claude Console API key (not covered by Claude Pro) |
 
 ### Repository layout
 
@@ -106,7 +106,8 @@ timesheet-exception-agent/
 - [x] Synthetic data generator (`uv run python -m timesheet_exception_agent.sim.seed`): 1 state (CO), 10 staff, 5 frontline + 2 next-level managers, 8 exceptions, all 6 personas; `tests/test_seed.py`
 - [x] Simulated clock and persona-driven reply generator (`sim/clock.py`, `sim/personas.py`; `tests/test_sim.py`)
 - [x] Outreach tools (`get_exception`, `get_presence`, `get_next_level_manager`, `send_message`, `check_replies`, `update_status`, `get_time`) in `tools/outreach.py`; `tests/test_outreach_tools.py`
-- [ ] Outreach agent with ReAct, plus the driver loop (Monday 8:00 → 10:00 AM in 10-minute steps)
+- [x] Outreach agent with ReAct, plus the driver loop (Monday 8:00 → 10:00 AM in 10-minute steps) in `agents/outreach.py`; `tests/test_outreach_agent.py`
+- [x] First live run with Claude (`uv run python -m timesheet_exception_agent.agents.outreach`), 2026-11-03 on Haiku 5.5; see session log
 - [ ] 6–8 scenario tests with expected outcomes
 
 ## 5. Evaluation plan
@@ -124,7 +125,7 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 
 ## 6. Open items
 
-- Confirm the model provider used in the labs
+- Model provider decided: Claude (2026-11-02). Still worth checking whether the course offers API credits
 - Confirm exact weekly module deadlines
 - Week 3: decide pgvector only, or compare with Chroma for the design write-up
 - Seed uses 7 managers, not the 4 originally planned: each manager carries one persona, so covering all 6 personas needs at least 6
@@ -151,3 +152,56 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
   - Every send, received reply and status change goes to `audit_log` (actor `outreach_agent`). Tools never commit; the caller owns the transaction.
 - `tests/test_outreach_tools.py`: 26 tests against the seeded DB (each test reseeds and rolls back). Full suite 49 passing.
 - **Next:** Outreach agent with ReAct on `as_tools()`, plus the driver loop (8:00 → 10:00 AM in 10-minute steps). Not yet done: updating `manager_stats` (long-term memory) on sends and replies.
+- Merged as PR #3 (squash, `fe2c81a`) into `master`.
+
+### 2026-11-02
+- Added `agents/outreach.py`:
+  - `build_agent(tools, model=None)`: LangChain `create_agent` (ReAct) over `as_tools()` with the workflow rules in the system prompt. The model comes from `LLM_MODEL` via `init_chat_model` (see the provider switch below).
+  - `OutreachDriver`: code decides when the agent works on an exception. Each 10-minute tick it delivers due replies, then wakes exceptions for `first_contact` (open, never contacted), `new_reply`, or `follow_up_due` (timer passed). `needs_fallback` exceptions wake only on a reply (a late approval before lock can still resolve them). Each wake is one fresh agent conversation; the database is the memory between wakes. Every turn's summary is audited as `agent_turn` and committed.
+  - At the lock, `run()` applies the deadline rule in code: everything still `open`/`contacted`/`escalated` moves to `needs_fallback`, audited with actor `outreach_driver`.
+- `tools/outreach.py`: added driver-only hooks `deliver_replies()`, `hand_off_unresolved()` and `audit(..., actor=...)` (not exposed to the model).
+- `db/connection.py`: `connect_timeout=5`, so tests fail fast when Docker is down instead of hanging.
+- `tests/test_outreach_agent.py`: 8 tests. Driver tests use a coded stand-in policy; agent wiring tests use a scripted fake chat model (no API calls). Full suite 57 passing.
+- **Not verified yet:** a live run with the real model. The wake and hand-off flow is tested, but how well the prompt drives real tool choices (escalation on out-of-office, ambiguous and injection replies) needs the live run and then the scenario tests.
+- **Next:** first live run; then 6–8 scenario tests with expected outcomes, and a fixed-reminder baseline for comparison. Still pending: `manager_stats` updates.
+- **Provider switched to Claude.** The `OPENAI_API_KEY` line came from the initial scaffold and the local `.env` only ever held a placeholder; OpenAI was never chosen. Removed `langchain-openai`, added `langchain-anthropic`. `default_model()` builds the model from `LLM_MODEL` (code default `anthropic:claude-opus-5-5`; the local `.env` overrides it to Haiku 5.5 for cost, and can switch to Sonnet 5.5 or Opus 5.5 if Haiku struggles with tricky replies) and, for Claude: `max_tokens` 16000, `output_config.effort` from `LLM_EFFORT` (default `medium`), no `temperature` (the Claude API now rejects it), and server-side refusal fallbacks (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`) on models that support them. The live-run script stops with a clear message if `ANTHROPIC_API_KEY` is missing. `.env.example` now lists `ANTHROPIC_API_KEY`, `LLM_MODEL`, `LLM_EFFORT`. 3 payload tests added (no API calls); full suite 60 passing.
+- Cost notes for the write-up: Claude Pro does not cover API usage; API credits are bought in the Claude Console. Rough cost per simulated lock morning: Opus 5.5 about $2, Sonnet 5.5 about $1, Haiku 5.5 about $0.05 (switch with `LLM_MODEL`).
+- Run metadata: `model_settings()` reports the model and effort from `LLM_MODEL` / `LLM_EFFORT`. The live-run script prints `Model: ... (effort ...)` before anything else, and stops before reseeding if `ANTHROPIC_API_KEY` is missing or still the `<your-key>` placeholder. `OutreachDriver.run(details=...)` writes a `run_started` audit entry (no exception id, actor `outreach_driver`) holding those settings, so each run's results can be tied to the model that produced them (`SELECT details FROM audit_log WHERE action = 'run_started'`). The audit log is cleared by the seed, so compare runs before reseeding or export results per run. Full suite 63 passing.
+
+### 2026-11-03
+- **First live run** (Claude Haiku 5.5, effort medium): 21 agent turns, 14 messages sent, 7 replies, 8 status changes, nothing left for the lock hand-off.
+
+  | Exception | Expected (scenario map) | Live result |
+  | --- | --- | --- |
+  | E-01, E-02 (responsive manager) | resolved | resolved 08:10 |
+  | E-03, E-08 (manager on leave) | escalate at once, next level approves | escalated to N-01 at 08:00 (presence showed out of office), resolved 08:10 |
+  | E-05 (correction) | correction_requested | correction_requested 08:20, reason says 72 h not 80 |
+  | E-06 (new hire, no next level) | teammate, then needs_fallback | emailed teammate E-09, needs_fallback 08:00 |
+  | E-04, E-07 (silent manager, slow next level) | escalate at 08:30; needs_fallback at 09:00 when N-02 misses her 30 minutes | escalated at 08:30, but **re-messaged N-02 at 09:00 and 09:30 instead of needs_fallback**; resolved 09:50 only because the slow approval (09:45) arrived before the lock |
+
+- Messages were short, polite, named the employee and the 10:00 AM lock, and used "their" for employees.
+- Problems found:
+  1. The 30-minute next-level rule lives only in the prompt, and Haiku did not follow it (4 messages to N-02 per exception instead of 1). This breaks the project rule that timers and escalation are deterministic code.
+  2. `send_message` rejected channel "Teams" (capitalized); the agent recovered on retry, but the tool could accept any casing.
+  3. Agent summaries guessed pronouns for managers ("she"); the prompt should say to refer to people by name.
+  4. A message for a not_approved exception mentioned "check the unusual hours" (minor wording copied from the prompt).
+- **Fixes after run 1:**
+  - The 30-minute next-level rule is now code: `OutreachDriver.due()` hands an `escalated` exception to the coordinator (`needs_fallback`, actor `outreach_driver`) when its follow-up time passes with no new reply, without waking the agent. A reply that arrives in the same tick wins. A later reply still wakes the agent, so a late approval before the lock can resolve it. New tools hook `hand_off(ids, reason)`; `hand_off_unresolved()` uses it.
+  - `send_message` lowercases and trims the channel (" Teams " → "teams").
+  - Prompt: escalate to the next level once and leave the timeout to the system; ask only for what the exception type needs; refer to people by name or role and never assume pronouns.
+  - 4 new tests; full suite 67 passing.
+- **Live run 2** (Haiku 5.5, same seed), compared with run 1:
+
+  | | Run 1 | Run 2 |
+  | --- | --- | --- |
+  | Agent turns | 21 | 17 |
+  | Messages sent | 14 | 10 |
+  | Messages to N-02 per silent-manager exception | 3 | 1 |
+  | E-04 / E-07 at 09:00 | still waiting, re-messaged | `needs_fallback` by code |
+  | E-04 / E-07 final | resolved 09:50 | resolved 09:50 (late approval moved them from `needs_fallback` to `resolved`) |
+  | Tool errors | 1 (channel casing) | 0 |
+  | Pronouns in summaries | "she" for managers | names or "they" |
+  | Off-type wording | "check the unusual hours" on not_approved | none seen |
+
+  All other exceptions ended the same as run 1 and as the scenario map expects.
+- **Scenario note:** with the slow persona at 75 minutes, N-02's approval (09:45) always lands before the lock, so E-04/E-07 never finish in the history-fallback state the scenario map describes. The scenario tests should also run them with N-02 overridden to `silent` to cover the true fallback path.

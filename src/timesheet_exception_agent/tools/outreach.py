@@ -26,6 +26,7 @@ from timesheet_exception_agent.sim.clock import (
 from timesheet_exception_agent.sim.personas import ReplySimulator, record_replies
 
 ACTOR = "outreach_agent"
+DRIVER = "outreach_driver"
 CHANNELS = {"email", "teams"}
 MAX_BODY = 2000
 
@@ -156,7 +157,7 @@ class OutreachTools:
 
     def check_replies(self, exception_id: int) -> dict:
         """Deliver replies that have arrived by now, then list every reply on this exception."""
-        self._deliver_due()
+        self.deliver_replies()
         rows = self.conn.execute(
             "SELECT m.id, m.person_id, e.name, m.channel, m.body, m.sim_time"
             " FROM messages m JOIN employees e ON e.id = m.person_id"
@@ -186,6 +187,7 @@ class OutreachTools:
     ) -> dict:
         """Send an email or Teams message about an exception to the manager, the next-level
         manager, or a teammate. Sets contacted/escalated status and the next check time."""
+        channel = channel.strip().lower()
         if channel not in CHANNELS:
             raise ToolError(f"channel must be one of {sorted(CHANNELS)}")
         body = body.strip()
@@ -287,6 +289,59 @@ class OutreachTools:
             )
         ]
 
+    # Driver hooks (code only, not exposed to the model)
+
+    def deliver_replies(self) -> list[int]:
+        """Record replies that have arrived by now; return the exceptions they belong to."""
+        replies = self.sim.due(self.clock.now())
+        record_replies(self.conn, replies)
+        for r in replies:
+            self._audit(
+                "reply_received",
+                r.exception_id,
+                f"reply from {r.person_id}",
+                {"person_id": r.person_id, "channel": r.channel},
+                when=r.sim_time,
+            )
+        return sorted({r.exception_id for r in replies})
+
+    def hand_off_unresolved(self, reason: str) -> list[int]:
+        """Deadline rule: move every exception still waiting on a manager to the coordinator."""
+        rows = self.conn.execute(
+            "SELECT id FROM exceptions WHERE status IN ('open', 'contacted', 'escalated')"
+        ).fetchall()
+        return self.hand_off([r[0] for r in rows], reason)
+
+    def hand_off(self, exception_ids: list[int], reason: str) -> list[int]:
+        """Move exceptions to needs_fallback for the coordinator, audited as the driver."""
+        ids = sorted(exception_ids)
+        if not ids:
+            return []
+        self.conn.execute(
+            "UPDATE exceptions SET status = 'needs_fallback', next_check_at = NULL"
+            " WHERE id = ANY(%s)",
+            (ids,),
+        )
+        for exception_id in ids:
+            self._audit(
+                "update_status",
+                exception_id,
+                reason,
+                {"to": "needs_fallback"},
+                actor=DRIVER,
+            )
+        return ids
+
+    def audit(
+        self,
+        action: str,
+        exception_id: int | None,
+        reason: str,
+        details: dict,
+        actor: str,
+    ) -> None:
+        self._audit(action, exception_id, reason, details, actor=actor)
+
     # Helpers
 
     def _role(self, info: dict, person_id: str) -> str:
@@ -304,32 +359,21 @@ class OutreachTools:
             f" exception {info['exception_id']}"
         )
 
-    def _deliver_due(self) -> None:
-        replies = self.sim.due(self.clock.now())
-        record_replies(self.conn, replies)
-        for r in replies:
-            self._audit(
-                "reply_received",
-                r.exception_id,
-                f"reply from {r.person_id}",
-                {"person_id": r.person_id, "channel": r.channel},
-                when=r.sim_time,
-            )
-
     def _audit(
         self,
         action: str,
-        exception_id: int,
+        exception_id: int | None,
         reason: str,
         details: dict,
         when: datetime | None = None,
+        actor: str = ACTOR,
     ) -> None:
         self.conn.execute(
             "INSERT INTO audit_log (sim_time, actor, action, exception_id, reason, details)"
             " VALUES (%s, %s, %s, %s, %s, %s)",
             (
                 when or self.clock.now(),
-                ACTOR,
+                actor,
                 action,
                 exception_id,
                 reason,
@@ -341,9 +385,8 @@ class OutreachTools:
 def _safe(fn):
     """Return rule violations to the model as an error result instead of raising."""
 
-    @functools.wraps(
-        fn
-    )  # keeps the signature and type hints the tool schema is built from
+    # functools.wraps keeps the signature and type hints the tool schema is built from.
+    @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)

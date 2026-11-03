@@ -230,3 +230,12 @@ def test_as_tools_exposes_seven_tools_and_returns_errors(tools):
         {"exception_id": E01, "status": "closed", "reason": "done"}
     )
     assert "error" in result
+
+
+def test_channel_casing_is_normalized(tools, conn):
+    result = tools.send_message(E01, "M-01", " Teams ", "Please approve.")
+    assert result["channel"] == "teams"
+    stored = conn.execute(
+        "SELECT channel FROM messages WHERE direction = 'sent'"
+    ).fetchone()
+    assert stored == ("teams",)
