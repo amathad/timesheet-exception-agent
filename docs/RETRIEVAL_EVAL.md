@@ -47,10 +47,11 @@ Current corpus (37 chunks, 22 cases) and gold set (19 policy questions). The 202
 - **A new section can pull in unrelated questions.** The first wording of "Manager asks the coordinator to use history" (added 2026-11-05 for the use_history scenario) repeated words that nearly every section shares: manager, approve, coordinator, escalate, reminders. It turned up in the top 3 for unrelated questions, and hybrid recall@3 fell to 0.79. A shorter wording that keeps the rule but drops the shared words scored 0.84, with the same 3 misses as before, and still ranks first for the manager's raw reply text. Both wordings were measured in a rolled-back transaction and the better one was kept. Since the choice was made on this gold set, 0.84 is an optimistic number.
 - **Case retrieval is easier.** Each case has distinctive facts (sick pay code, reduced schedule, new hire), and every method but keyword-only finds all 7 in the top 3.
 
-## Implications for the agent (PR b)
+## How the agent uses retrieval (PR #7)
 
-- The agent gets the top 3 hybrid results with their source (document and section, or case id), so it can cite what it used.
-- Retrieved text is reference material. The tools still enforce the rules, so a retrieval miss can make an explanation weaker but can't cause a rule violation.
-- If hit@1 starts to matter (for example a single cited policy in a hand-off reason), the options are a cross-encoder reranker over the top 10, or adding synonyms ("vacation", "PTO" → leave) to the policy text. Both should be measured on a larger gold set first.
+- The agent's `search_policy`, and the driver's own search on every wake that follows a reply, return the top 3 hybrid results with `[doc > section]` citations. `find_similar_cases` returns the top 3 cases and a history-reliability note that code decides (`history_check`).
+- Retrieved text is reference material. The tools still enforce the rules, and `update_status` accepts a citation only if retrieval returned it for that exception. A retrieval miss can make an explanation weaker but can't cause a rule violation.
+- Live evidence is in `docs/LIVE_RUNS.md`, runs F to P. That includes the `use_history` A/B (runs I and J), where retrieval changed how the agent handled the exceptions.
+- The ranking limit shows up live as well: for E-06 the best rule was outside the top 3. If hit@1 starts to matter, the options are a cross-encoder reranker over the top 10, or synonyms ("vacation", "PTO" → leave) in the policy text. Both should be measured on a larger gold set first.
 
 `tests/test_retrieval.py::test_gold_set_recall_with_real_model` keeps floors just below these numbers (policies 0.75, cases 0.85) to catch regressions.
