@@ -27,8 +27,8 @@ STALLING_NOTES = (
 
 # Reply kind -> (minutes after the message is sent, body template). None = never replies.
 # A tuple of templates means the person answers every message, using the templates in turn.
-# "ambiguous", "injection" and "stalling" are not seeded personas; scenario tests and live runs
-# switch them on with `overrides`.
+# "ambiguous", "injection", "stalling" and "use_history" are not seeded personas; scenario
+# tests and live runs switch them on with `overrides`.
 REPLIES: dict[str, tuple[int, str | tuple[str, ...]] | None] = {
     "responsive": (
         10,
@@ -57,6 +57,15 @@ REPLIES: dict[str, tuple[int, str | tuple[str, ...]] | None] = {
         ),
     ),
     "stalling": (5, STALLING_NOTES),
+    # Sounds like approval but isn't: the manager hands the decision to the coordinator.
+    # Policy (history_fallback.md) says to hand off at once, and not to copy unreliable history.
+    "use_history": (
+        15,
+        (
+            "I'm travelling today without access to the timesheet system. Please just use"
+            " what {employee} usually works."
+        ),
+    ),
 }
 
 AUTO_REPLY_KINDS = {"on_leave", "no_next_level"}

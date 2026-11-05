@@ -11,6 +11,9 @@ Business rules are enforced here, not left to the model:
 - After the lock, managers can no longer approve, so the agent cannot mark anything resolved.
 - While the driver has the agent working on one exception (`scoped`), sends and status
   changes on any other exception are refused, so a reply can't steer the agent into others.
+- A status reason may cite policy only as a handbook section ([doc > section]) that
+  retrieval returned for that exception: the agent's or the driver's search_policy, or a
+  find_similar_cases history note (all in audit_log). Anything else is refused.
 - Every action is written to audit_log.
 
 The caller owns the transaction: tools never commit.
@@ -24,6 +27,7 @@ from datetime import datetime, timedelta
 from langchain_core.tools import StructuredTool
 from psycopg.types.json import Jsonb
 
+from timesheet_exception_agent.retrieval.search import CITATION, citation
 from timesheet_exception_agent.sim.clock import (
     END_OF_DAY,
     LOCK,
@@ -201,7 +205,8 @@ class OutreachTools:
         self, exception_id: int, person_id: str, channel: str, body: str
     ) -> dict:
         """Send an email or Teams message about an exception to the manager, the next-level
-        manager, or a teammate. Sets contacted/escalated status and the next check time."""
+        manager, or a teammate. Sending sets the contacted or escalated status and the next
+        check time itself, so do not call update_status afterwards to record it."""
         self._check_scope(exception_id)
         channel = channel.strip().lower()
         if channel not in CHANNELS:
@@ -272,11 +277,17 @@ class OutreachTools:
         (manager asked for different hours), or needs_fallback (hand to the coordinator).
         A reason is required. Approving time and closing exceptions are for the coordinator."""
         self._check_scope(exception_id)
+        if status in ("contacted", "escalated"):
+            raise ToolError(
+                f"{status} is set by send_message when the message goes out; no update_status"
+                " call is needed"
+            )
         if status not in AGENT_STATUSES:
             raise ToolError(f"the agent may only set {sorted(AGENT_STATUSES)}")
         reason = reason.strip()
         if not reason:
             raise ToolError("a reason is required")
+        self._check_citations(exception_id, reason)
         current = self.get_exception(exception_id)["status"]
         if status not in TRANSITIONS[current]:
             raise ToolError(
@@ -387,6 +398,36 @@ class OutreachTools:
             raise ToolError(
                 f"you are working on exception {self.scope}; changes to exception"
                 f" {exception_id} are not allowed now"
+            )
+
+    def _check_citations(self, exception_id: int, reason: str) -> None:
+        cited = CITATION.findall(reason)
+        if not cited:
+            return
+        known = set(
+            self.conn.execute("SELECT doc, section FROM policy_chunks").fetchall()
+        )
+        unknown = [citation(d, s) for d, s in cited if (d, s) not in known]
+        if unknown:
+            raise ToolError(
+                f"{', '.join(unknown)} is not a section of the policy handbook. Cite a"
+                " section exactly as search_policy returned it, or leave the citation out."
+            )
+        retrieved = {
+            source
+            for (sources,) in self.conn.execute(
+                "SELECT details->'sources' FROM audit_log WHERE exception_id = %s"
+                " AND action IN ('search_policy', 'find_similar_cases')",
+                (exception_id,),
+            )
+            for source in sources or []
+        }
+        unretrieved = [citation(d, s) for d, s in cited if citation(d, s) not in retrieved]
+        if unretrieved:
+            raise ToolError(
+                f"{', '.join(unretrieved)} was not returned by any search on exception"
+                f" {exception_id}. Cite only sections retrieved for this exception, or"
+                " leave the citation out."
             )
 
     def _refuse_early_escalation(self, info: dict) -> None:

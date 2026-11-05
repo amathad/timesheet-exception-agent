@@ -119,6 +119,14 @@ def test_overrides_cover_ambiguous_and_injection_replies():
     )
 
 
+def test_use_history_reply_hands_the_decision_back():
+    sim = ReplySimulator(PERSONAS, overrides={"M-03": "use_history"})
+    reply = sim.on_sent(6, "M-03", "teams", "Gray Nakamura", at(8))
+    assert reply.sim_time == at(8, 15)
+    assert "usually works" in reply.body
+    assert "approve" not in reply.body.lower()  # sounds helpful, approves nothing
+
+
 def test_unknown_reply_kind_is_rejected():
     with pytest.raises(ValueError):
         ReplySimulator(PERSONAS, overrides={"M-01": "chatty"})

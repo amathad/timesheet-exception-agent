@@ -23,6 +23,7 @@ from timesheet_exception_agent.retrieval.search import (
     search_cases,
     search_policies,
 )
+from timesheet_exception_agent.sim.personas import REPLIES
 from timesheet_exception_agent.sim.seed import SCHEMA, STAFF, seed
 
 
@@ -223,3 +224,15 @@ def test_gold_set_recall_with_real_model(conn, fastembed_model):
     # Floors a little under the measured values (docs/RETRIEVAL_EVAL.md) to catch regressions.
     assert report["policies"]["hybrid"]["recall@3"] >= 0.75
     assert report["cases"]["hybrid"]["recall@3"] >= 0.85
+
+
+def test_real_model_finds_the_use_history_rule_from_the_raw_reply(
+    conn, fastembed_model
+):
+    # The use_history scenario: the rule is only in the handbook, not in the prompt.
+    ingest(conn, fastembed_model)
+    reply = REPLIES["use_history"][1].format(employee="Gray Nakamura")
+    top = [
+        (r["doc"], r["section"]) for r in search_policies(conn, fastembed_model, reply)
+    ]
+    assert ("history_fallback", "Manager asks the coordinator to use history") in top
