@@ -9,12 +9,16 @@ Business rules are enforced here, not left to the model:
 - The agent can never approve time or close an exception. It can only record what a manager
   said (resolved, correction_requested) or hand the exception to the coordinator (needs_fallback).
 - After the lock, managers can no longer approve, so the agent cannot mark anything resolved.
+- While the driver has the agent working on one exception (`scoped`), sends and status
+  changes on any other exception are refused, so a reply can't steer the agent into others.
 - Every action is written to audit_log.
 
 The caller owns the transaction: tools never commit.
 """
 
 import functools
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from langchain_core.tools import StructuredTool
@@ -72,6 +76,7 @@ class OutreachTools:
         self.conn = conn
         self.clock = clock
         self.sim = sim
+        self.scope: int | None = None  # the exception the agent is working on, if any
 
     # Read tools
 
@@ -197,6 +202,7 @@ class OutreachTools:
     ) -> dict:
         """Send an email or Teams message about an exception to the manager, the next-level
         manager, or a teammate. Sets contacted/escalated status and the next check time."""
+        self._check_scope(exception_id)
         channel = channel.strip().lower()
         if channel not in CHANNELS:
             raise ToolError(f"channel must be one of {sorted(CHANNELS)}")
@@ -265,6 +271,7 @@ class OutreachTools:
         """Record the outcome of a reply: resolved (manager approved), correction_requested
         (manager asked for different hours), or needs_fallback (hand to the coordinator).
         A reason is required. Approving time and closing exceptions are for the coordinator."""
+        self._check_scope(exception_id)
         if status not in AGENT_STATUSES:
             raise ToolError(f"the agent may only set {sorted(AGENT_STATUSES)}")
         reason = reason.strip()
@@ -312,6 +319,15 @@ class OutreachTools:
         ]
 
     # Driver hooks (code only, not exposed to the model)
+
+    @contextmanager
+    def scoped(self, exception_id: int) -> Iterator[None]:
+        """Limit sends and status changes to one exception while the agent works on it."""
+        self.scope = exception_id
+        try:
+            yield
+        finally:
+            self.scope = None
 
     def deliver_replies(self) -> list[int]:
         """Record replies that have arrived by now; return the exceptions they belong to."""
@@ -365,6 +381,13 @@ class OutreachTools:
         self._audit(action, exception_id, reason, details, actor=actor)
 
     # Helpers
+
+    def _check_scope(self, exception_id: int) -> None:
+        if self.scope is not None and exception_id != self.scope:
+            raise ToolError(
+                f"you are working on exception {self.scope}; changes to exception"
+                f" {exception_id} are not allowed now"
+            )
 
     def _refuse_early_escalation(self, info: dict) -> None:
         manager = info["manager"]

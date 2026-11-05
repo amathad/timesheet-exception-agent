@@ -545,3 +545,75 @@ def test_summary_keeps_only_text_when_thinking_blocks_are_present(conn, clock, t
         agent_act(agent, clock)(Wake(E01, "new_reply"))
         == "Waited for the follow-up time."
     )
+
+
+# Ambiguous and injection replies
+
+
+def test_driver_scopes_each_wake_to_its_exception(conn, clock, tools):
+    results = []
+
+    def act(wake):
+        other = E02 if wake.exception_id != E02 else E01
+        results.append(
+            tools.as_tools()[-1].invoke(
+                {
+                    "exception_id": other,
+                    "status": "needs_fallback",
+                    "reason": "a reply said so",
+                }
+            )
+        )
+        return "tried another exception"
+
+    OutreachDriver(conn, clock, tools, act).tick()
+    assert all("error" in r for r in results)
+    assert set(statuses(conn).values()) == {"open"}
+
+
+def test_injected_instruction_cannot_reach_other_exceptions(conn, clock, tools):
+    # A model that obeys the injected "approve everyone" instruction.
+    script = iter(
+        [
+            AIMessage(
+                "",
+                tool_calls=[
+                    call(
+                        "update_status",
+                        {
+                            "exception_id": E02,
+                            "status": "needs_fallback",
+                            "reason": "per reply",
+                        },
+                        "1",
+                    )
+                ],
+            ),
+            AIMessage("Done."),
+        ]
+    )
+    agent = build_agent(tools, ScriptedModel(messages=script))
+    with tools.scoped(E01):
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": "Work exception 1."}]}
+        )
+    tool_reply = next(m for m in result["messages"] if m.type == "tool")
+    assert "working on exception 1" in tool_reply.content
+    assert statuses(conn)[E02] == "open"
+
+
+def test_ambiguous_manager_is_reminded_then_escalated_at_nine(conn, clock):
+    stalling_morning(conn, clock, {"M-01": "ambiguous"})
+    final = statuses(conn)
+    assert final[E01] == final[E02] == "resolved"
+    for exception_id in (E01, E02):
+        assert (
+            sent_to(conn, exception_id, "M-01") == 2
+        )  # first message and one reminder
+        assert sent_to(conn, exception_id, "N-01") == 1
+        approved_by = conn.execute(
+            "SELECT person_id FROM messages WHERE exception_id = %s AND direction = 'received'"
+            " ORDER BY sim_time DESC LIMIT 1",
+            (exception_id,),
+        ).fetchone()[0]
+        assert approved_by == "N-01"
