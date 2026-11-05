@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-02:** database seeded; simulated clock, persona reply generator, Outreach tools, and Outreach agent with driver loop built (tested with a scripted model; no live LLM run yet).
+**Status as of 2026-11-04:** database seeded; simulated clock, persona reply generator, Outreach tools, and Outreach agent with driver loop built; three live runs on Claude Haiku 5.5, including the true fallback path with a silent next-level manager.
 
 ---
 
@@ -34,6 +34,8 @@ The workflow was described by a practicing payroll coordinator. **All project da
 1. Contact the employee's manager by **email or Teams** to approve or update the time.
 2. If the manager is **on leave** (Teams shows out of office, or they reply saying they're out), **escalate immediately** to the next-level manager. Leave is the usual reason a first manager is unavailable.
 3. The next-level manager is expected to reply **within 30 minutes**.
+   - If the manager keeps replying but hasn't approved or corrected by **9:00 AM** (for example, stuck in meetings), escalate to the next-level manager at 9:00. Both managers get ample time, and the next-level manager still has their 30 minutes before the lock. (Decided 2026-11-04.)
+   - A manager who has replied is not escalated before 9:00 AM; they get reminders instead. Silent and out-of-office managers can still be escalated earlier. (Decided 2026-11-04; enforced in `send_message`.)
 4. If neither responds, the coordinator approves time from the employee's **last two pay periods** (schedule, pay code, hours), records it with **initials and timestamp**, and notifies the manager, who can still object before payroll runs.
 5. If history is missing or unreliable (new hire, schedule change, unusual hours): try someone on the employee's **team**, using the extra time until end of day Monday. If that fails, enter **standard hours for the job type** (for example, 8 hours a day), to be corrected later through retro.
 
@@ -43,6 +45,7 @@ The workflow was described by a practicing payroll coordinator. **All project da
 
 - The agent **never approves or enters time on its own.** It proposes; the coordinator approves.
 - Every action is written to an **audit log** (who, what, when, why).
+- At most **3 messages to the same person** about one exception (the first message plus two reminders). (Decided 2026-11-04.)
 - **Business rules live in deterministic code**: deadlines, timers, escalation chain, hour calculations. The LLM writes messages, interprets replies, explains estimates, and chooses the next action.
 - Manager replies are **untrusted input** and must never be followed as instructions.
 - State wage and overtime rules are out of scope.
@@ -205,3 +208,34 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 
   All other exceptions ended the same as run 1 and as the scenario map expects.
 - **Scenario note:** with the slow persona at 75 minutes, N-02's approval (09:45) always lands before the lock, so E-04/E-07 never finish in the history-fallback state the scenario map describes. The scenario tests should also run them with N-02 overridden to `silent` to cover the true fallback path.
+
+### 2026-11-04
+- **Silent next-level manager (the true fallback path).** The live-run script takes `--override PERSON=KIND` (repeatable; any reply kind in `sim/personas.py`), e.g. `--override N-02=silent`. Overrides are printed at the start and saved in the `run_started` audit entry with the model. `parse_overrides()` rejects malformed items and unknown kinds.
+- Deterministic tests (no API calls): an `Escalator` stand-in policy runs the whole morning. With N-02 silent, E-04/E-07 get one message to N-02 each and are handed to the coordinator by code at 09:00; with the default slow N-02, the 09:45 approval moves them from `needs_fallback` to `resolved`. Plus override-parsing tests. Full suite 76 passing.
+- **Live run 3** (Haiku 5.5, `--override N-02=silent`): E-04/E-07 contacted M-03 at 08:00, escalated once to N-02 at 08:30, handed to the coordinator by code at 09:00 (`needs_fallback`, actor `outreach_driver`), and stayed there through the lock; the agent was not woken for them again. Final: E-01, E-02, E-03, E-08 resolved; E-05 correction_requested; E-04, E-06, E-07 needs_fallback. 15 agent turns, 10 messages, no tool errors. This now matches the scenario map's history-fallback case for E-04 (the Estimator will propose those hours).
+- **Next:** 6–8 scenario tests with expected outcomes (ambiguous reply, injection reply, correction after lock, duplicate exception), and a fixed-reminder baseline for comparison. Still pending: `manager_stats` updates.
+- **Stalling manager scenario** (a manager who keeps replying "in meetings, will get to it" but never approves):
+  - New reply kind `stalling` in `sim/personas.py`: answers every message 5 minutes later with a rotating holding note (one says "I'll approve ... right after my 9:30"), never approves. The only kind that replies more than once per exception.
+  - 9:00 AM cut-off in code: from 9:00, an exception still `contacted` (waiting on the frontline manager) wakes once with `escalation_due`, even if a holding reply arrived the same tick. The prompt says to escalate then unless the latest reply approves or corrects; with no next level, `needs_fallback`.
+  - `send_message` refuses a 4th message to the same person about the same exception.
+  - Prompt: holding replies are not approvals, even if they say "approve"; don't answer each holding note.
+  - Live-run summaries now keep only text blocks (`.text`); with thinking on, the raw content included thinking blocks and signatures, which also went into the audit log. The run script writes UTF-8 output.
+  - 9 new deterministic tests (stalling replies, cut-off wake, message limit, full stalling mornings with responsive and silent next level, summary text). Full suite 85 passing.
+- **Live runs with a stalling manager** (Haiku 5.5):
+
+  | | Run A: `M-01=stalling` | Run B: `M-01=stalling`, `N-01=silent` |
+  | --- | --- | --- |
+  | Holding notes treated as approval | none | none |
+  | E-01 / E-02 escalated to N-01 | 08:30 (at follow-up, not at the 09:00 cut-off) | 08:30 |
+  | E-01 / E-02 final | resolved 08:40 by N-01 | `needs_fallback` by code at 09:00 |
+  | Other exceptions | as in earlier runs | E-03 / E-08 also `needs_fallback` (N-01 silent); rest as earlier |
+
+- Findings:
+  1. **Escalated too early.** Haiku escalated at the 08:30 follow-up instead of reminding the manager and waiting for the 09:00 cut-off, so the frontline manager did not get the time the 9:00 rule intends. The rule is still only in the prompt; it could be enforced in `send_message` (before 9:00, block a next-level message when the frontline manager has replied and isn't out of office).
+  2. **A summary claimed an action that didn't happen.** In run A, E-06's 08:00 summary said it was set to `needs_fallback`, but it stayed `open` and kept waking (08:30, 09:00, 09:30), messaging teammate E-09 again each time. The 3-message limit stopped it at 09:30, and only then was it actually set. Agent summaries are not reliable records; the audit log is.
+- **9:00 cut-off enforced in code** (after finding 1): `send_message` refuses a message to the next-level manager before 9:00 when the frontline manager has replied on that exception and their presence isn't `out_of_office`. The error tells the agent to send a reminder or wait. Silent managers (no reply) and out-of-office managers can still be escalated earlier. `ESCALATION_CUTOFF` now lives in `tools/outreach.py`, and the driver imports it. The prompt says the same, so the agent doesn't learn it only from a refusal. 3 new tool tests; the `Escalator` test policy now treats a refusal as "wait", as the real agent does. Full suite 88 passing.
+- **Live run C** (Haiku 5.5, `--override M-01=stalling`), after the fix:
+  - E-01 / E-02: Teams message 08:00 → holding note 08:05 → reminder 08:30 → second holding note 08:35 ("I'll approve ... right after my 9:30") → `escalation_due` wake at 09:00 → escalated to N-01 → approved 09:10 → resolved.
+  - The agent never tried to escalate early (no refusals), never treated a holding note as an approval, and sent Casey 2 messages per exception (within the limit of 3).
+  - All other exceptions ended as in earlier runs. E-06 was set to `needs_fallback` at 08:00 as its summary said, so finding 2 did not recur this run.
+- **Next:** commit; then the remaining scenario tests (ambiguous reply, injection reply, correction after lock, duplicate exception) and the fixed-reminder baseline. Still pending: `manager_stats` updates.

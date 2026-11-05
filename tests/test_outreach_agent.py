@@ -11,12 +11,13 @@ from timesheet_exception_agent.agents.outreach import (
     build_agent,
     default_model,
     model_settings,
+    parse_overrides,
 )
 from timesheet_exception_agent.db.connection import get_conn
 from timesheet_exception_agent.sim.clock import LOCK, START, SimClock
 from timesheet_exception_agent.sim.personas import ReplySimulator, load_personas
 from timesheet_exception_agent.sim.seed import seed
-from timesheet_exception_agent.tools.outreach import OutreachTools
+from timesheet_exception_agent.tools.outreach import OutreachTools, ToolError
 
 # Exception ids follow the seed's EXCEPTIONS order.
 E01, E02, E03, E08, E04, E07, E05, E06 = range(1, 9)
@@ -321,3 +322,226 @@ def test_manager_follow_up_still_wakes_agent(conn, clock, tools):
     driver = OutreachDriver(conn, clock, tools, Recorder(tools))
     assert Wake(E04, "follow_up_due") in driver.due()
     assert statuses(conn)[E04] == "contacted"
+
+
+# Next-level manager never replies: the real fallback path
+
+
+class Escalator(Recorder):
+    """Recorder that also escalates to the next-level manager when a follow-up is due."""
+
+    def __call__(self, wake: Wake) -> str:
+        info = self.tools.get_exception(wake.exception_id)
+        if wake.reason == "follow_up_due" and info["status"] == "contacted":
+            nxt = self.tools.get_next_level_manager(info["manager"]["id"])
+            if nxt["next_level_manager"]:
+                self.wakes.append((self.tools.clock.now(), wake))
+                try:
+                    self.tools.send_message(
+                        wake.exception_id,
+                        nxt["next_level_manager"]["id"],
+                        "email",
+                        "Please approve.",
+                    )
+                except (
+                    ToolError
+                ):  # e.g. the manager replied, so escalation waits for 9:00
+                    return "waiting"
+                return "escalated"
+        return super().__call__(wake)
+
+
+def run_morning(conn, clock, overrides=None):
+    sim = ReplySimulator(load_personas(conn), overrides=overrides)
+    tools = OutreachTools(conn, clock, sim)
+    OutreachDriver(conn, clock, tools, Escalator(tools)).run()
+
+
+def sent_to(conn, exception_id, person_id):
+    return conn.execute(
+        "SELECT count(*) FROM messages WHERE direction = 'sent'"
+        " AND exception_id = %s AND person_id = %s",
+        (exception_id, person_id),
+    ).fetchone()[0]
+
+
+def test_silent_next_level_ends_with_coordinator(conn, clock):
+    run_morning(conn, clock, overrides={"N-02": "silent"})
+    final = statuses(conn)
+    assert final[E04] == final[E07] == "needs_fallback"
+    for exception_id in (E04, E07):
+        assert sent_to(conn, exception_id, "N-02") == 1
+        actor, reason, when = conn.execute(
+            "SELECT actor, reason, sim_time FROM audit_log"
+            " WHERE action = 'update_status' AND exception_id = %s",
+            (exception_id,),
+        ).fetchone()
+        # Contacted 08:00, escalated 08:30, handed off by code at 09:00.
+        assert actor == "outreach_driver" and "30 minutes" in reason
+        assert when == START + timedelta(minutes=60)
+
+
+def test_slow_next_level_late_approval_still_resolves(conn, clock):
+    run_morning(conn, clock)
+    final = statuses(conn)
+    assert final[E04] == final[E07] == "resolved"
+    changes = conn.execute(
+        "SELECT details->>'to' FROM audit_log WHERE action = 'update_status'"
+        " AND exception_id = %s ORDER BY id",
+        (E04,),
+    ).fetchall()
+    assert [c[0] for c in changes] == ["needs_fallback", "resolved"]
+
+
+@pytest.mark.parametrize(
+    "items, expected",
+    [
+        ([], {}),
+        (["N-02=silent"], {"N-02": "silent"}),
+        ([" M-01 = injection "], {"M-01": "injection"}),
+    ],
+)
+def test_parse_overrides(items, expected):
+    assert parse_overrides(items) == expected
+
+
+@pytest.mark.parametrize("item", ["N-02", "N-02=", "=silent", "N-02=chatty"])
+def test_parse_overrides_rejects_bad_input(item):
+    with pytest.raises(ValueError):
+        parse_overrides([item])
+
+
+# Stalling manager and the 9:00 AM escalation cut-off
+
+
+class Reminder(Recorder):
+    """Policy for a manager who keeps replying: remind at follow-up, escalate at the cut-off."""
+
+    def __call__(self, wake: Wake) -> str:
+        info = self.tools.get_exception(wake.exception_id)
+        self.wakes.append((self.tools.clock.now(), wake))
+        if wake.reason == "follow_up_due" and info["status"] == "contacted":
+            self.tools.send_message(
+                wake.exception_id,
+                info["manager"]["id"],
+                "teams",
+                "Reminder: please approve.",
+            )
+            return "reminded"
+        if wake.reason == "escalation_due":
+            nxt = self.tools.get_next_level_manager(info["manager"]["id"])
+            if nxt["next_level_manager"]:
+                self.tools.send_message(
+                    wake.exception_id,
+                    nxt["next_level_manager"]["id"],
+                    "teams",
+                    "The manager could not get to this. Please approve.",
+                )
+                return "escalated"
+            self.tools.update_status(
+                wake.exception_id, "needs_fallback", "no next level"
+            )
+            return "handed off"
+        self.wakes.pop()
+        return super().__call__(wake)
+
+
+def stalling_morning(conn, clock, overrides):
+    sim = ReplySimulator(load_personas(conn), overrides=overrides)
+    tools = OutreachTools(conn, clock, sim)
+    act = Reminder(tools)
+    OutreachDriver(conn, clock, tools, act).run()
+    return act
+
+
+def test_cutoff_wakes_contacted_exception_once_at_nine(conn, clock, tools):
+    tools.send_message(E01, "M-01", "teams", "Please submit Avery's time.")
+    driver = OutreachDriver(conn, clock, tools, Recorder(tools))
+    clock.advance_to(START + timedelta(minutes=50))
+    assert Wake(E01, "escalation_due") not in driver.due()
+    clock.advance_to(START + timedelta(minutes=60))
+    assert Wake(E01, "escalation_due") in driver.due()
+    clock.advance()
+    assert Wake(E01, "escalation_due") not in driver.due()
+
+
+def test_cutoff_wins_over_a_holding_reply_in_the_same_tick(conn, clock):
+    sim = ReplySimulator(load_personas(conn), overrides={"M-01": "stalling"})
+    tools = OutreachTools(conn, clock, sim)
+    clock.advance_to(START + timedelta(minutes=50))
+    tools.send_message(
+        E01, "M-01", "teams", "Please submit Avery's time."
+    )  # reply 08:55
+    clock.advance()
+    due = OutreachDriver(conn, clock, tools, Recorder(tools)).due()
+    assert Wake(E01, "escalation_due") in due
+    assert Wake(E01, "new_reply") not in due
+
+
+def test_cutoff_ignores_exceptions_not_waiting_on_the_frontline_manager(
+    conn, clock, tools
+):
+    tools.send_message(
+        E03, "N-01", "teams", "Please approve Cameron's time."
+    )  # escalated
+    clock.advance_to(START + timedelta(minutes=60))
+    due = OutreachDriver(conn, clock, tools, Recorder(tools)).due()
+    assert Wake(E03, "escalation_due") not in due
+
+
+def test_stalling_manager_is_escalated_at_nine_and_next_level_approves(conn, clock):
+    act = stalling_morning(conn, clock, {"M-01": "stalling"})
+    final = statuses(conn)
+    assert final[E01] == final[E02] == "resolved"
+    for exception_id in (E01, E02):
+        assert (
+            sent_to(conn, exception_id, "M-01") == 2
+        )  # first message and one reminder
+        assert sent_to(conn, exception_id, "N-01") == 1
+        assert (
+            START + timedelta(minutes=60),
+            Wake(exception_id, "escalation_due"),
+        ) in act.wakes
+        resolved_by = conn.execute(
+            "SELECT m.person_id FROM messages m WHERE m.exception_id = %s"
+            " AND m.direction = 'received' ORDER BY m.sim_time DESC LIMIT 1",
+            (exception_id,),
+        ).fetchone()[0]
+        assert resolved_by == "N-01"
+
+
+def test_stalling_manager_with_silent_next_level_ends_with_coordinator(conn, clock):
+    stalling_morning(conn, clock, {"M-01": "stalling", "N-01": "silent"})
+    final = statuses(conn)
+    assert final[E01] == final[E02] == "needs_fallback"
+    when, actor = conn.execute(
+        "SELECT sim_time, actor FROM audit_log WHERE action = 'update_status'"
+        " AND exception_id = %s",
+        (E01,),
+    ).fetchone()
+    assert actor == "outreach_driver"
+    assert when == START + timedelta(minutes=90)  # escalated 09:00, 30-minute window
+    holding = conn.execute(
+        "SELECT count(*) FROM messages WHERE exception_id = %s AND person_id = 'M-01'"
+        " AND direction = 'received'",
+        (E01,),
+    ).fetchone()[0]
+    assert holding == 2  # the manager kept replying, but nothing was resolved
+
+
+def test_summary_keeps_only_text_when_thinking_blocks_are_present(conn, clock, tools):
+    script = iter(
+        [
+            AIMessage(
+                [
+                    {"type": "thinking", "thinking": "", "signature": "sig"},
+                    {"type": "text", "text": "Waited for the follow-up time."},
+                ]
+            )
+        ]
+    )
+    agent = build_agent(tools, ScriptedModel(messages=script))
+    assert (
+        agent_act(agent, clock)(Wake(E01, "new_reply"))
+        == "Waited for the follow-up time."
+    )

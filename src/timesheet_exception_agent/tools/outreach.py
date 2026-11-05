@@ -1,7 +1,10 @@
 """Mock tools for the Outreach agent, backed by the database, SimClock and ReplySimulator.
 
 Business rules are enforced here, not left to the model:
-- Messages can only go to the employee's manager, the next-level manager, or a teammate.
+- Messages can only go to the employee's manager, the next-level manager, or a teammate,
+  and at most 3 times to the same person about the same exception.
+- Before the 9:00 AM cut-off, escalating to the next-level manager is refused while the
+  frontline manager is engaged: they have replied and are not out of office.
 - Contact and escalation statuses and follow-up timers are set by code when a message is sent.
 - The agent can never approve time or close an exception. It can only record what a manager
   said (resolved, correction_requested) or hand the exception to the coordinator (needs_fallback).
@@ -29,6 +32,13 @@ ACTOR = "outreach_agent"
 DRIVER = "outreach_driver"
 CHANNELS = {"email", "teams"}
 MAX_BODY = 2000
+# First message plus two reminders per person per exception (decided 2026-11-04).
+MAX_MESSAGES_PER_PERSON = 3
+# Cut-off rule (decided 2026-11-04): a frontline manager who has replied gets until 9:00 AM
+# to approve or correct, for example one stuck in meetings. Escalation opens then, and the
+# next-level manager still gets their 30 minutes with time to spare before the 10:00 AM lock.
+# Silent and out-of-office managers can be escalated earlier.
+ESCALATION_CUTOFF = MANAGER_WINDOW
 
 # How long to wait for a reply before the next check, capped at the lock while it's ahead.
 FOLLOW_UP = timedelta(minutes=30)
@@ -200,7 +210,19 @@ class OutreachTools:
         if info["status"] in ("resolved", "closed"):
             raise ToolError(f"exception {exception_id} is already {info['status']}")
         role = self._role(info, person_id)
+        already_sent = self.conn.execute(
+            "SELECT count(*) FROM messages WHERE exception_id = %s AND person_id = %s"
+            " AND direction = 'sent'",
+            (exception_id, person_id),
+        ).fetchone()[0]
+        if already_sent >= MAX_MESSAGES_PER_PERSON:
+            raise ToolError(
+                f"already sent {already_sent} messages to {person_id} about exception"
+                f" {exception_id}; the limit is {MAX_MESSAGES_PER_PERSON}. Escalate or wait."
+            )
         now = self.clock.now()
+        if role == "next_level_manager" and now < ESCALATION_CUTOFF:
+            self._refuse_early_escalation(info)
 
         self.conn.execute(
             "INSERT INTO messages (exception_id, person_id, channel, direction, body, sim_time)"
@@ -343,6 +365,21 @@ class OutreachTools:
         self._audit(action, exception_id, reason, details, actor=actor)
 
     # Helpers
+
+    def _refuse_early_escalation(self, info: dict) -> None:
+        manager = info["manager"]
+        replied = self.conn.execute(
+            "SELECT count(*) FROM messages WHERE exception_id = %s AND person_id = %s"
+            " AND direction = 'received'",
+            (info["exception_id"], manager["id"]),
+        ).fetchone()[0]
+        out = self.get_presence(manager["id"])["status"] == "out_of_office"
+        if replied and not out:
+            raise ToolError(
+                f"{manager['name']} has replied and is not out of office, so escalation to"
+                f" the next-level manager opens at {ESCALATION_CUTOFF:%H:%M}. Send"
+                f" {manager['name']} a reminder or wait until then."
+            )
 
     def _role(self, info: dict, person_id: str) -> str:
         manager = info["manager"]
