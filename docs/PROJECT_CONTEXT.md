@@ -177,4 +177,5 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Added `retrieval/`: 9 synthetic policy documents in `policies/` (7 coordinator-handbook documents and 2 distractors), 21 past resolved cases in `cases.py` that match the seed's people, personas and history, `embeddings.py` (`FastEmbedder`, plus `HashEmbedder` for tests), `ingest.py`, `search.py` (pgvector + full-text, reciprocal rank fusion, source citations, refuses vectors from a different model), and `eval.py`.
 - Schema: `policy_chunks` and `case_memory` (12 tables). The seed leaves them alone.
 - Evaluation on 18 policy and 7 case questions: hybrid policy recall@3 0.83 (vector 0.78, keyword 0.72), but vector has the better hit@1 (0.72 vs 0.56). Equal-weight fusion kept; see `docs/RETRIEVAL_EVAL.md`. Full suite 110 passing.
+- Merged as PR #6 (squash, `c829675`) into `master`.
 - **Next:** PR (b): Outreach retrieval tools, prompt citations, live run.
