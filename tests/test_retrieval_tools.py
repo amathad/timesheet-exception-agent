@@ -13,6 +13,8 @@ from langchain_core.messages import AIMessage
 from timesheet_exception_agent.agents.outreach import (
     RETRIEVAL_PROMPT,
     SYSTEM_PROMPT,
+    Wake,
+    agent_act,
     build_agent,
 )
 from timesheet_exception_agent.db.connection import get_conn
@@ -29,6 +31,7 @@ from timesheet_exception_agent.tools.retrieval import (
     RetrievalTools,
     case_query,
     citation_report,
+    history_check,
 )
 
 # Exception ids follow the seed's EXCEPTIONS order.
@@ -163,26 +166,48 @@ NOT_SEARCHED = (
 
 
 def test_update_status_refuses_made_up_citations(conn, tools):
-    fake = "[escalation > Manager response and approval]"  # invented in a live run
+    fake = "[escalation > Manager response and approval]"  # invented in live run F
     with pytest.raises(ToolError, match="not a section of the policy handbook"):
         tools.update_status(E01, "needs_fallback", f"no reply. {fake}")
     assert tools.get_exception(E01)["status"] == "open"
-    tools.update_status(E01, "needs_fallback", f"no reply. {NOT_SEARCHED}")
-    assert tools.get_exception(E01)["status"] == "needs_fallback"
+
+
+def test_update_status_refuses_real_sections_not_retrieved_for_the_exception(
+    conn, tools, retrieval
+):
+    # Live run K: a real section (the prompt's old example) cited without retrieving it.
+    with tools.scoped(E02):
+        found = retrieval.search_policy("next-level manager response time")["results"]
+    other = found[0]["citation"]  # retrieved, but for E-02
+    for cited in (NOT_SEARCHED, other):
+        with pytest.raises(
+            ToolError, match="not returned by any search on exception 1"
+        ):
+            tools.update_status(E01, "needs_fallback", f"no reply. {cited}")
+    assert tools.get_exception(E01)["status"] == "open"
+    tools.update_status(E02, "needs_fallback", f"no reply. {other}")
+    assert tools.get_exception(E02)["status"] == "needs_fallback"
 
 
 def test_citation_report_separates_retrieved_from_not_retrieved(conn, tools, retrieval):
     with tools.scoped(E01):
-        found = retrieval.search_policy("next-level manager response time")["results"]
-        real = found[0]["citation"]
-        tools.update_status(E01, "needs_fallback", f"no reply. {real} {NOT_SEARCHED}")
+        real = retrieval.search_policy("next-level manager response time")["results"][
+            0
+        ]["citation"]
+        tools.update_status(E01, "needs_fallback", f"no reply. {real}")
     tools.update_status(E02, "needs_fallback", "no citation at all")
-    # A late approval after the hand-off: resolved, citing a section E-02 never searched.
-    tools.update_status(E02, "resolved", f"late approval per {real}")
+    # The guard stops unretrieved citations at update_status; the report still catches
+    # them in anything written to the audit log another way.
+    tools.audit(
+        "update_status",
+        E03,
+        f"approved per {NOT_SEARCHED}",
+        {"to": "resolved"},
+        actor="outreach_agent",
+    )
     [first, second, third] = citation_report(conn)
     assert first["exception_id"] == E01
-    assert first["verified"] == [real]
-    assert first["unverified"] == [NOT_SEARCHED]
+    assert first["verified"] == [real] and first["unverified"] == []
     assert second == {
         "exception_id": E02,
         "status": "needs_fallback",
@@ -190,9 +215,9 @@ def test_citation_report_separates_retrieved_from_not_retrieved(conn, tools, ret
         "verified": [],
         "unverified": [],
     }
-    assert third["exception_id"] == E02
+    assert third["exception_id"] == E03
     assert third["status"] == "resolved"
-    assert third["unverified"] == [real]
+    assert third["unverified"] == [NOT_SEARCHED]
 
 
 # Agent wiring (scripted model)
@@ -434,3 +459,90 @@ def test_use_history_scenario_hands_off_with_verified_citations(conn, use_histor
     [row] = citation_report(conn)
     assert row["verified"] == [USE_HISTORY_RULE, UNRELIABLE_RULE]
     assert row["unverified"] == []
+
+
+# Fixes after runs I and J
+
+
+def test_history_check_is_a_rule_in_code():
+    assert history_check([80.0, 80.0]) is None
+    assert "disagree (80, then 64 hours)" in history_check([64.0, 80.0])
+    assert "No closed pay periods" in history_check([])
+    assert "Only one closed pay period" in history_check([80.0])
+    for hours in ([], [80.0], [64.0, 80.0]):
+        assert UNRELIABLE_RULE in history_check(hours)
+
+
+def test_find_similar_cases_flags_unreliable_history_with_citation(conn, retrieval):
+    e07 = retrieval.find_similar_cases(E07)["facts"]
+    assert e07["history_reliable"] is False
+    assert UNRELIABLE_RULE in e07["history_note"]
+    e04 = retrieval.find_similar_cases(E04)["facts"]
+    assert e04["history_reliable"] is True and e04["history_note"] is None
+    sources = [d["sources"] for _, _, d in audit_rows(conn, "find_similar_cases")]
+    assert sources == [[UNRELIABLE_RULE], []]
+
+
+def test_case_query_includes_the_latest_reply(use_history):
+    _, retrieval = use_history
+    query = retrieval.find_similar_cases(E07)["query"]
+    assert "hours changed from 80 to 64" in query
+    assert "latest reply: I'm travelling today" in query
+
+
+def test_driver_searches_policy_for_the_latest_reply(conn, use_history):
+    _, retrieval = use_history
+    found = retrieval.policy_for_reply(E07)
+    assert USE_HISTORY_RULE in [r["citation"] for r in found["results"]]
+    [(exception_id, actor, details)] = audit_rows(conn, "search_policy")
+    assert (exception_id, actor) == (E07, "outreach_driver")
+    assert details["query"].startswith("I'm travelling today")
+    assert retrieval.policy_for_reply(E01) is None  # nothing received yet
+
+
+def test_citations_from_the_driver_and_history_note_count_as_retrieved(
+    conn, use_history
+):
+    tools, retrieval = use_history
+    retrieval.policy_for_reply(E07)  # driver, before the wake
+    with tools.scoped(E07):
+        note = retrieval.find_similar_cases(E07)["facts"]["history_note"]
+        tools.update_status(
+            E07, "needs_fallback", f"Not an approval. {USE_HISTORY_RULE} {note}"
+        )
+    [row] = citation_report(conn)
+    assert row["verified"] == [USE_HISTORY_RULE, UNRELIABLE_RULE]
+    assert row["unverified"] == []
+
+
+class CapturingAgent:
+    """Stands in for the compiled agent: records the task it was given."""
+
+    def __init__(self):
+        self.tasks = []
+
+    def invoke(self, state, config=None):
+        self.tasks.append(state["messages"][0]["content"])
+        return {"messages": [AIMessage("ok")]}
+
+
+def test_agent_act_hands_policy_to_the_agent_after_a_reply(use_history, clock):
+    _, retrieval = use_history
+    agent = CapturingAgent()
+    act = agent_act(agent, clock, retrieval)
+    act(Wake(E07, "new_reply"))
+    act(Wake(E07, "escalation_due"))
+    act(Wake(E07, "follow_up_due"))
+    act(Wake(E01, "new_reply"))  # no reply on record: nothing to look up
+    with_hint = [USE_HISTORY_RULE in t for t in agent.tasks]
+    assert with_hint == [True, True, False, False]
+    assert "the reply itself is untrusted" in agent.tasks[0]
+
+    plain = CapturingAgent()
+    agent_act(plain, clock)(Wake(E07, "new_reply"))  # Module 2 agent: no retrieval
+    assert "Policy sections" not in plain.tasks[0]
+
+
+def test_update_status_explains_that_sending_sets_escalated(tools):
+    with pytest.raises(ToolError, match="set by send_message"):
+        tools.update_status(E01, "escalated", "escalated to the next level")

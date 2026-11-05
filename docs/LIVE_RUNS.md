@@ -35,6 +35,9 @@ All runs on Claude Haiku 5.5, effort medium.
 | H | 2026-11-05 | none, with retrieval | after the citation guard: same outcomes as run F, no made-up citations |
 | I | 2026-11-05 | `M-03=use_history`, with retrieval | E-04/E-07 handed to the coordinator at 08:30/08:20 citing the policy; E-07's history conflict flagged; no escalation |
 | J | 2026-11-05 | `M-03=use_history`, `--no-retrieval` | baseline: 3 reminders and 2 escalations; handed off at 09:30 by the code timeout; conflict not flagged |
+| K, L, M | 2026-11-05 | `M-03=use_history`, after fixes 1–3 | 3 of 3: both exceptions handed off on the first turn after the reply (08:20), unreliable-history rule cited, P3-01 mentioned; run K cited a section it hadn't retrieved |
+| N | 2026-11-05 | none, after fixes 1–3 | same outcomes as runs F and H |
+| O, P | 2026-11-05 | `M-03=use_history`, then none, after the stricter citation guard | as K–M and N; every citation retrieved, no refusals |
 
 ## Run 1 (2026-11-03): first live run
 
@@ -169,3 +172,33 @@ Findings:
 3. Whether a proposed fallback should be 64, 80 or standard hours is the Estimator's job (Module 4). The Outreach agent only passed on the facts, which is correct.
 
 Covered in code by `tests/test_retrieval_tools.py`: the facts in `find_similar_cases`, the early-escalation refusal on this reply, and a scripted hand-off whose two citations come out as verified. `tests/test_retrieval.py` checks that the real model finds the rule from the reply text, and `tests/test_sim.py` covers the reply kind.
+
+## Runs K to P (2026-11-05): fixing the findings from run I
+
+Three findings from runs F to J were fixed and checked again on Haiku 5.5.
+
+| # | Finding | Fix | Where |
+| --- | --- | --- | --- |
+| 1 | E-04, run I: on its first turn after the reply, the agent skipped searching and tried to escalate. The prompt left lookups to the agent, and it seems to have read "travelling without system access" as step 3 ("out of the office, escalate"). | On every wake that follows a reply (`new_reply`, `escalation_due`), the **driver** searches the handbook with the reply text and puts the top 3 sections in the agent's task. The search is audited (actor `outreach_driver`). The prompt now limits step 3 to people who say they are on leave or out of the office. | `RetrievalTools.policy_for_reply`, `agent_act` / `policy_hint`, `RETRIEVAL_PROMPT` |
+| 2 | E-07, run I: the unreliable-history rule wasn't cited, and the similar case was P3-07 instead of P3-01. | Whether history can be copied is decided **in code**: `history_check` sets `history_reliable` and a `history_note` with the rule's citation in `find_similar_cases` facts. The similar-case query now includes the latest reply, so cases about the same kind of reply rank higher. | `history_check`, `public_facts`, `case_query` |
+| 3 | Runs F and J: after escalating, the agent called `update_status` to record it, and the tools rejected the call. | The `send_message` description says sending sets the status. `update_status` explains that `contacted` and `escalated` come from sending. | `tools/outreach.py` |
+
+The `--no-retrieval` agent's prompt is unchanged, so run J is still a valid baseline.
+
+**`use_history`, three runs after the fixes (K, L, M):**
+
+| E-04 / E-07 | Run I (before) | Runs K, L, M (after) |
+| --- | --- | --- |
+| First turn after the reply hands off | E-04 no (tried to escalate), E-07 yes | **3 of 3 runs, both exceptions**, at 08:20 |
+| Messages after the reply / to N-02 | 0 / 0 | 0 / 0 in all three |
+| E-07 cites `[history_fallback > When history is missing or unreliable]` | no | 3 of 3 |
+| E-07 mentions P3-01 (reduced schedule at 64 hours) | no (P3-07) | 3 of 3 (L also mentions P3-07) |
+| Agent turns | 16 | 15 each |
+
+**Default morning (N):** same final statuses as runs F and H. In this run E-04/E-07 reach the driver's timeout at 09:00 (M-03 is silent there) and are resolved by N-02's 09:45 approval. No citations appeared in messages to managers in any run (8–10 checked per run). No rejected status updates were seen in K to P, although tool errors aren't audited, so this rests on the agents' summaries.
+
+**A new finding in run K, fixed:** E-08's resolved reason cited `[escalation > Next-level manager response time]`, a real section that no search had returned for E-08. It was the example citation written into the prompt. The guard only checked that a section existed, so it let the citation through, and `citation_report` flagged it as not retrieved.
+- Fix: the prompt now shows only the form `[doc > section]`. `update_status` also refuses any citation that retrieval (the agent's search, the driver's search, or a history note) didn't return **for that exception**, using the sources recorded in `audit_log`.
+- Runs O (`use_history`) and P (default) after this change: same outcomes as K–M and N, every citation retrieved, and no refusals.
+
+Still open: the best rule for E-06 ranks outside the top 3, and 3 gold-set questions miss (see `docs/RETRIEVAL_EVAL.md`). Both need a better ranker and a larger gold set.

@@ -7,8 +7,13 @@ sources returned, so a citation in a status reason can be checked against what t
 actually retrieved (see citation_report).
 
 find_similar_cases builds its query from the exception's facts in code (type, job type,
-history, manager presence, escalation chain, status). It never reads sim_personas, which
-exists only for the simulation.
+history, manager presence, escalation chain, status) plus the latest reply. It never reads
+sim_personas, which exists only for the simulation. Whether the employee's pay history can
+be copied is a business rule, decided here in code (history_check), not by the model.
+
+policy_for_reply is for the driver, not the model: on a wake that follows a reply, code
+searches the handbook with the reply text, so the agent always has the rules that may apply
+in front of it when it decides, instead of only when it chooses to search.
 
 The caller owns the transaction: tools never commit.
 """
@@ -27,10 +32,13 @@ from timesheet_exception_agent.retrieval.search import (
     search_policies,
 )
 from timesheet_exception_agent.sim.clock import SimClock
-from timesheet_exception_agent.tools.outreach import ACTOR, ToolError, _safe
+from timesheet_exception_agent.tools.outreach import ACTOR, DRIVER, ToolError, _safe
 
 TOP_K = 3
 MAX_QUERY = 500
+MAX_REPLY_IN_QUERY = (
+    300  # characters of the latest reply added to the similar-case query
+)
 MAX_TEXT = (
     800  # characters of policy text per result, so a call can't flood the context
 )
@@ -41,6 +49,7 @@ REFERENCE_NOTE = (
 )
 
 CITATION_EXPECTED = ("needs_fallback", "correction_requested")
+HISTORY_RULE = citation("history_fallback", "When history is missing or unreliable")
 
 TYPE_PHRASES = {
     "not_submitted": "time was not submitted",
@@ -78,6 +87,17 @@ class RetrievalTools:
         query = query.strip()
         if len(query) > MAX_QUERY:
             raise ToolError(f"query is longer than {MAX_QUERY} characters")
+        return self._search_policy(query, self.current_exception(), self.actor)
+
+    def policy_for_reply(self, exception_id: int) -> dict | None:
+        """Driver hook (not a model tool): search the handbook with the exception's latest
+        reply. Audited as the driver. None if nothing has been received yet."""
+        reply = self._latest_reply(exception_id)
+        if reply is None:
+            return None
+        return self._search_policy(reply[:MAX_QUERY], exception_id, DRIVER)
+
+    def _search_policy(self, query: str, exception_id: int | None, actor: str) -> dict:
         try:
             rows = search_policies(self.conn, self.embedder, query, k=TOP_K)
         except RetrievalError as e:
@@ -93,19 +113,20 @@ class RetrievalTools:
         ]
         self._audit(
             "search_policy",
-            self.current_exception(),
+            exception_id,
             f"policy search: {query}",
             {"query": query, "sources": [r["citation"] for r in results]},
+            actor=actor,
         )
         return {"query": query, "note": REFERENCE_NOTE, "results": results}
 
     def find_similar_cases(self, exception_id: int) -> dict:
         """Find the 3 past resolved exceptions most like this one, with how each was
         resolved, the outcome and hours entered. Cases with the same employee or manager are
-        marked. Also returns the facts the search used, including the employee's hours in
-        the last two closed pay periods."""
+        marked. Also returns the facts the search used: the employee's hours in the last
+        two closed pay periods and whether that history is reliable enough to copy."""
         facts = self._facts(exception_id)
-        query = case_query(facts)
+        query = case_query(facts, self._latest_reply(exception_id))
         try:
             rows = search_cases(self.conn, self.embedder, query, k=TOP_K)
         except RetrievalError as e:
@@ -128,15 +149,21 @@ class RetrievalTools:
             }
             for r in rows
         ]
+        shown = public_facts(facts)
+        sources = [HISTORY_RULE] if shown["history_note"] else []
         self._audit(
             "find_similar_cases",
             exception_id,
             f"similar cases: {query}",
-            {"query": query, "cases": [r["case_id"] for r in results]},
+            {
+                "query": query,
+                "cases": [r["case_id"] for r in results],
+                "sources": sources,
+            },
         )
         return {
             "exception_id": exception_id,
-            "facts": public_facts(facts),
+            "facts": shown,
             "query": query,
             "note": REFERENCE_NOTE,
             "cases": results,
@@ -182,13 +209,28 @@ class RetrievalTools:
             "recent_hours": hours,  # newest first
         }
 
-    def _audit(self, action: str, exception_id, reason: str, details: dict) -> None:
+    def _latest_reply(self, exception_id: int) -> str | None:
+        row = self.conn.execute(
+            "SELECT body FROM messages WHERE exception_id = %s AND direction = 'received'"
+            " ORDER BY sim_time DESC, id DESC LIMIT 1",
+            (exception_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def _audit(
+        self,
+        action: str,
+        exception_id,
+        reason: str,
+        details: dict,
+        actor: str | None = None,
+    ) -> None:
         self.conn.execute(
             "INSERT INTO audit_log (sim_time, actor, action, exception_id, reason, details)"
             " VALUES (%s, %s, %s, %s, %s, %s)",
             (
                 self.clock.now(),
-                self.actor,
+                actor or self.actor,
                 action,
                 exception_id,
                 reason,
@@ -197,21 +239,43 @@ class RetrievalTools:
         )
 
 
+def history_check(hours: list[float]) -> str | None:
+    """Business rule (history_fallback policy): history can be copied only when the last two
+    closed periods exist and agree. Returns why it can't, with the rule's citation, or None
+    if it can. `hours` is newest first."""
+    if not hours:
+        return f"No closed pay periods, so there is no history to copy. {HISTORY_RULE}"
+    if len(hours) < 2:
+        return (
+            f"Only one closed pay period ({hours[0]:g} hours), so there are not two periods"
+            f" to copy. {HISTORY_RULE}"
+        )
+    if hours[0] != hours[1]:
+        return (
+            f"The last two periods disagree ({hours[1]:g}, then {hours[0]:g} hours), so"
+            f" history is unreliable and should not be copied. {HISTORY_RULE}"
+        )
+    return None
+
+
 def public_facts(facts: dict) -> dict:
-    """The facts shown to the model: raw data only, no estimate. Proposing hours from this
-    history is the Estimator's job (Module 4)."""
+    """The facts shown to the model: raw data and the code's reliability check, no estimate.
+    Proposing hours from this history is the Estimator's job (Module 4)."""
     hours = facts["recent_hours"]
+    note = history_check(hours)
     return {
         "job_type": facts["job_type"],
         "status": facts["status"],
         "recent_hours_newest_first": hours,
         "last_two_periods_agree": len(hours) == 2 and hours[0] == hours[1],
+        "history_reliable": note is None,
+        "history_note": note,
         "manager_out_of_office": facts["manager_out"],
         "has_next_level_manager": facts["has_next_level"],
     }
 
 
-def case_query(facts: dict) -> str:
+def case_query(facts: dict, latest_reply: str | None = None) -> str:
     """Describe an exception in the words past cases use, from facts only."""
     parts = [TYPE_PHRASES[facts["type"]]]
     if facts["job_type"] == "part_time_hourly":
@@ -229,6 +293,10 @@ def case_query(facts: dict) -> str:
         parts.append("no next-level manager")
     if facts["status"] in STATUS_PHRASES:
         parts.append(STATUS_PHRASES[facts["status"]])
+    if latest_reply:
+        # Untrusted text, used only as search words: it lets cases about the same kind of
+        # reply rank higher.
+        parts.append(f"latest reply: {latest_reply.strip()[:MAX_REPLY_IN_QUERY]}")
     return "; ".join(parts)
 
 
@@ -237,12 +305,13 @@ def citation_report(conn) -> list[dict]:
 
     One row per agent status change that cites something, plus every needs_fallback or
     correction_requested (where a citation is expected) even if it cites nothing: the
-    citations, which came back from a search_policy call on the same exception, and which
-    did not.
+    citations, which came back from retrieval on the same exception (the agent's or the
+    driver's search_policy, or a find_similar_cases history note), and which did not.
     """
     retrieved: dict[int, set[str]] = {}
     for exception_id, details in conn.execute(
-        "SELECT exception_id, details FROM audit_log WHERE action = 'search_policy'"
+        "SELECT exception_id, details FROM audit_log"
+        " WHERE action IN ('search_policy', 'find_similar_cases')"
     ):
         retrieved.setdefault(exception_id, set()).update(details.get("sources", []))
     report = []
