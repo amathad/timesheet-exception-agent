@@ -11,6 +11,8 @@ Business rules are enforced here, not left to the model:
 - After the lock, managers can no longer approve, so the agent cannot mark anything resolved.
 - While the driver has the agent working on one exception (`scoped`), sends and status
   changes on any other exception are refused, so a reply can't steer the agent into others.
+- A status reason may cite policy only as a section that exists in the handbook
+  ([doc > section], as search_policy returns it); a made-up citation is refused.
 - Every action is written to audit_log.
 
 The caller owns the transaction: tools never commit.
@@ -24,6 +26,7 @@ from datetime import datetime, timedelta
 from langchain_core.tools import StructuredTool
 from psycopg.types.json import Jsonb
 
+from timesheet_exception_agent.retrieval.search import CITATION, citation
 from timesheet_exception_agent.sim.clock import (
     END_OF_DAY,
     LOCK,
@@ -277,6 +280,7 @@ class OutreachTools:
         reason = reason.strip()
         if not reason:
             raise ToolError("a reason is required")
+        self._check_citations(reason)
         current = self.get_exception(exception_id)["status"]
         if status not in TRANSITIONS[current]:
             raise ToolError(
@@ -387,6 +391,18 @@ class OutreachTools:
             raise ToolError(
                 f"you are working on exception {self.scope}; changes to exception"
                 f" {exception_id} are not allowed now"
+            )
+
+    def _check_citations(self, reason: str) -> None:
+        cited = CITATION.findall(reason)
+        if not cited:
+            return
+        known = set(self.conn.execute("SELECT doc, section FROM policy_chunks").fetchall())
+        unknown = [citation(d, s) for d, s in cited if (d, s) not in known]
+        if unknown:
+            raise ToolError(
+                f"{', '.join(unknown)} is not a section of the policy handbook. Cite a"
+                " section exactly as search_policy returned it, or leave the citation out."
             )
 
     def _refuse_early_escalation(self, info: dict) -> None:

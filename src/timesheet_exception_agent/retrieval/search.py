@@ -10,17 +10,24 @@ Results carry their source (document and section, or case id) so answers can cit
 Retrieved text is reference material: business rules are still enforced in code.
 """
 
+import re
 from dataclasses import dataclass
 
 from timesheet_exception_agent.retrieval.embeddings import Embedder, to_pgvector
 
 MODES = ("hybrid", "vector", "keyword")
+# How a policy source is written in search results and cited in status reasons.
+CITATION = re.compile(r"\[([a-z_]+) > ([^\]]+)\]")
 RRF_K = 60  # standard RRF constant; damps the weight of the very top ranks
 POOL = 20  # candidates taken from each ranking before fusion
 
 
 class RetrievalError(Exception):
     pass
+
+
+def citation(doc: str, section: str) -> str:
+    return f"[{doc} > {section}]"
 
 
 @dataclass(frozen=True)
@@ -123,7 +130,7 @@ def search(
     query = query.strip()
     if not query:
         raise RetrievalError("query is empty")
-    _require_corpus(conn, corpus, embedder.name)
+    require_corpus(conn, corpus, embedder.name)
 
     similarity: dict = {}
     rankings = []
@@ -164,7 +171,7 @@ def search_cases(conn, embedder: Embedder, query: str, k: int = 3, **kw) -> list
     return search(conn, embedder, CASES, query, k, **kw)
 
 
-def _require_corpus(conn, corpus: Corpus, model: str) -> None:
+def require_corpus(conn, corpus: Corpus, model: str) -> None:
     n = conn.execute(
         f"SELECT count(*) FROM {corpus.table} WHERE model = %s", (model,)
     ).fetchone()[0]

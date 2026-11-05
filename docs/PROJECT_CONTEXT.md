@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-04:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) in progress: corpus, pgvector store, hybrid search and evaluation built; agent tools next.
+**Status as of 2026-11-05:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Next: Module 4 (Estimator).
 
 ---
 
@@ -44,7 +44,8 @@ The workflow was described by a practicing payroll coordinator. **All project da
 ### Guardrails
 
 - The agent **never approves or enters time on its own.** It proposes; the coordinator approves.
-- Every action is written to an **audit log** (who, what, when, why).
+- Every action is written to an **audit log** (who, what, when, why), including every retrieval call with its query and sources. (Decided 2026-11-05.)
+- Retrieved policy and cases are **reference material**: the agent cites a policy section only in status reasons, never in messages to managers, and `update_status` refuses citations that aren't real handbook sections. (Decided 2026-11-05.)
 - At most **3 messages to the same person** about one exception (the first message plus two reminders). (Decided 2026-11-04.)
 - **Business rules live in deterministic code**: deadlines, timers, escalation chain, hour calculations. The LLM writes messages, interprets replies, explains estimates, and chooses the next action.
 - Manager replies are **untrusted input** and must never be followed as instructions.
@@ -116,7 +117,7 @@ Retrieval tables (12 in total): `policy_chunks` and `case_memory`, each with a `
 - [x] First live run with Claude (`uv run python -m timesheet_exception_agent.agents.outreach`), 2026-11-03 on Haiku 5.5; see `docs/LIVE_RUNS.md`
 - [x] Outreach scenario tests with expected outcomes (silent and slow next level, stalling, ambiguous, injection) in `tests/test_outreach_agent.py`, plus live runs in `docs/LIVE_RUNS.md`. Duplicate exception and correction after lock are deferred to Intake/Triage and Supervisor
 - [x] Module 3 retrieval, PR (a): 9 synthetic policy documents (36 chunks) and 21 past cases; `policy_chunks` and `case_memory` tables; local fastembed embeddings; ingest (`uv run python -m timesheet_exception_agent.retrieval.ingest`); hybrid search; gold-set evaluation (`retrieval.eval`, results in `docs/RETRIEVAL_EVAL.md`); `tests/test_retrieval.py`
-- [ ] Module 3 retrieval, PR (b): `search_policy` and `find_similar_cases` tools for Outreach, prompt update to cite sources, live run
+- [x] Module 3 retrieval, PR (b): `search_policy` and `find_similar_cases` in `tools/retrieval.py` (audited), wired into Outreach with a citation prompt (`--no-retrieval` for the Module 2 agent), citation guard in `update_status`, `citation_report`; `tests/test_retrieval_tools.py`; live runs F–H in `docs/LIVE_RUNS.md`
 
 ## 5. Evaluation plan
 
@@ -179,3 +180,11 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Evaluation on 18 policy and 7 case questions: hybrid policy recall@3 0.83 (vector 0.78, keyword 0.72), but vector has the better hit@1 (0.72 vs 0.56). Equal-weight fusion kept; see `docs/RETRIEVAL_EVAL.md`. Full suite 110 passing.
 - Merged as PR #6 (squash, `c829675`) into `master`.
 - **Next:** PR (b): Outreach retrieval tools, prompt citations, live run.
+
+### 2026-11-05 (Module 3)
+- Defaults confirmed with the user: every retrieval call is audited, and citations stay out of messages to managers.
+- Added `tools/retrieval.py`. `search_policy` returns the top 3 sections with `[doc > section]` citations. `find_similar_cases` builds its query from the exception's facts in code and never reads the sim personas. Both tools are audited, and their results are marked as reference material.
+- Wired into the Outreach agent through `build_agent(..., retrieval=...)` and `RETRIEVAL_PROMPT`. The live-run script checks the corpus is loaded, and `--no-retrieval` runs the Module 2 agent.
+- Three live runs on Haiku (F, G, H in `docs/LIVE_RUNS.md`). Outcomes were unchanged from Module 2; hand-off and correction reasons cited retrieved sections; no citations appeared in messages to managers. Run F produced one made-up citation, now refused in code by `update_status`.
+- Open: the best E-06 rule ranked outside the top 3; see `docs/LIVE_RUNS.md`. Full suite 122 passing.
+- **Next:** Module 4: Estimator (hours from the last two pay periods in code, with `find_similar_cases` feeding its explanations). Still deferred: duplicate exception, correction after lock, fixed-reminder baseline, `manager_stats` updates.
