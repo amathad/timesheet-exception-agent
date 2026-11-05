@@ -296,4 +296,18 @@ CASES = [
         "manager_approved",
         80,
     ),
+    Case(
+        "P3-07",
+        P3,
+        "E-01",
+        "M-01",
+        "not_submitted",
+        "Avery Brook had not submitted. Casey Thorn replied from an airport without system"
+        " access and asked the coordinator to just use Avery's usual hours.",
+        "Not treated as an approval. Handed to the coordinator at 8:15 without escalating;"
+        " the last two periods agreed at 80 REG, so the coordinator approved 80 hours from"
+        " history with initials and timestamp and notified Casey Thorn.",
+        "history_fallback",
+        80,
+    ),
 ]

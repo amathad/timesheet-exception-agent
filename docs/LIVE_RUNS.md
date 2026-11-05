@@ -33,6 +33,8 @@ All runs on Claude Haiku 5.5, effort medium.
 | F | 2026-11-05 | none, with retrieval | same outcomes as run 2; hand-off and correction reasons cite retrieved sections; **one made-up citation** in a resolved reason |
 | G | 2026-11-05 | `N-02=silent`, with retrieval | same outcomes as run 3; citations all retrieved |
 | H | 2026-11-05 | none, with retrieval | after the citation guard: same outcomes as run F, no made-up citations |
+| I | 2026-11-05 | `M-03=use_history`, with retrieval | E-04/E-07 handed to the coordinator at 08:30/08:20 citing the policy; E-07's history conflict flagged; no escalation |
+| J | 2026-11-05 | `M-03=use_history`, `--no-retrieval` | baseline: 3 reminders and 2 escalations; handed off at 09:30 by the code timeout; conflict not flagged |
 
 ## Run 1 (2026-11-03): first live run
 
@@ -138,3 +140,32 @@ Fixes after run F:
 Run H confirmed the fix changes no outcomes. The guard didn't fire in run H, because the agent didn't make up a citation that time. The guard itself is covered by `tests/test_retrieval_tools.py`.
 
 Finding 2 is left open. If it keeps happening, the options are to return the top 5 sections or to add a reranker, measured on the gold set first.
+
+## Runs I and J (2026-11-05): a scenario only retrieval can handle (A/B)
+
+Runs F to H reached the same outcomes as Module 2, because every seeded situation is already covered by the prompt's numbered steps. This scenario is built so that the right handling depends on retrieval:
+
+- **The reply** (`use_history`, `--override M-03=use_history`): Harper Quill answers both of their exceptions, "I'm travelling today without access to the timesheet system. Please just use what {employee} usually works." It sounds helpful but approves nothing.
+- **The rule is only in the handbook**, not in the prompt: `[history_fallback > Manager asks the coordinator to use history]` says to hand off to the coordinator at once, without waiting for the 9:00 cut-off, and to say so if the history is unreliable. Past case P3-07 is a precedent.
+- **The deciding facts are only in what retrieval returns.** The Outreach tools don't show hours. `find_similar_cases` returns the history in `facts`: E-04 had 80 and 80 (agree), E-07 had 64 and 80 (disagree).
+- **Expected:** both exceptions `needs_fallback` before 9:00 with no escalation; E-07's reason warns the coordinator not to copy history; every citation is one the agent retrieved.
+
+Run I has retrieval on; run J has it off (`--no-retrieval`, the Module 2 agent). Both use Haiku 5.5. Only E-04 and E-07 differ; the other six exceptions ended as in runs F and H.
+
+| E-04 / E-07 | Run I: with retrieval | Run J: without retrieval |
+| --- | --- | --- |
+| Final status | needs_fallback / needs_fallback | needs_fallback / needs_fallback |
+| Who handed off, and when | the agent, 08:30 / 08:20 | the code's next-level timeout, 09:30 / 09:30 |
+| Messages after the reply | 0 | 5: 3 reminders to a manager with no system access, then 2 escalations to N-02 at 09:00 |
+| Reason given to the coordinator | the reply is not an approval, cites the handbook rule, gives the history (E-04 80/80 "looks reliable", E-07 64/80 "may be unreliable and standard hours may be needed"), similar case P3-07 | "next-level manager did not reply within 30 minutes" |
+| Citations | 2, both verified | none |
+| Agent turns | 16 | 20 |
+
+**Result:** the final statuses match, but retrieval changed what happened. The coordinator got both exceptions about an hour earlier, which is time they need before the lock and before end of day. E-07 came with the warning that its history conflicts. The traveling manager got no pointless reminders, and the next-level manager wasn't asked to approve. Without retrieval, the agent correctly refused to treat the reply as an approval, but it had no rule for the situation and no access to the hours, so it fell back on remind, then escalate, then time out.
+
+Findings:
+1. **The agent was inconsistent between two identical replies.** At 08:20, for E-04, the agent didn't search; it tried to escalate, which `send_message` refused before 9:00 (the manager had replied), and it left the exception waiting. At the 08:30 follow-up it searched and handed off. E-07 was handled correctly on its first wake. The code guard stopped the wrong path, and the next wake corrected it.
+2. **The unreliable-history rule was not cited for E-07.** The agent flagged the conflict from `facts` (64/80) in its own words, but it didn't search for `[history_fallback > When history is missing or unreliable]`. It also mentioned P3-07, a case with agreeing history, rather than P3-01 (a reduced schedule at 64 hours). This is because `find_similar_cases` builds its query from status and history and doesn't know what the reply asked for. P3-01 ranked second when the query also described the reply.
+3. Whether a proposed fallback should be 64, 80 or standard hours is the Estimator's job (Module 4). The Outreach agent only passed on the facts, which is correct.
+
+Covered in code by `tests/test_retrieval_tools.py`: the facts in `find_similar_cases`, the early-escalation refusal on this reply, and a scripted hand-off whose two citations come out as verified. `tests/test_retrieval.py` checks that the real model finds the rule from the reply text, and `tests/test_sim.py` covers the reply kind.

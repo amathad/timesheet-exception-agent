@@ -102,7 +102,8 @@ class RetrievalTools:
     def find_similar_cases(self, exception_id: int) -> dict:
         """Find the 3 past resolved exceptions most like this one, with how each was
         resolved, the outcome and hours entered. Cases with the same employee or manager are
-        marked."""
+        marked. Also returns the facts the search used, including the employee's hours in
+        the last two closed pay periods."""
         facts = self._facts(exception_id)
         query = case_query(facts)
         try:
@@ -135,6 +136,7 @@ class RetrievalTools:
         )
         return {
             "exception_id": exception_id,
+            "facts": public_facts(facts),
             "query": query,
             "note": REFERENCE_NOTE,
             "cases": results,
@@ -193,6 +195,20 @@ class RetrievalTools:
                 Jsonb(details),
             ),
         )
+
+
+def public_facts(facts: dict) -> dict:
+    """The facts shown to the model: raw data only, no estimate. Proposing hours from this
+    history is the Estimator's job (Module 4)."""
+    hours = facts["recent_hours"]
+    return {
+        "job_type": facts["job_type"],
+        "status": facts["status"],
+        "recent_hours_newest_first": hours,
+        "last_two_periods_agree": len(hours) == 2 and hours[0] == hours[1],
+        "manager_out_of_office": facts["manager_out"],
+        "has_next_level_manager": facts["has_next_level"],
+    }
 
 
 def case_query(facts: dict) -> str:

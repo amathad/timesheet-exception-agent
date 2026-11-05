@@ -397,7 +397,9 @@ class OutreachTools:
         cited = CITATION.findall(reason)
         if not cited:
             return
-        known = set(self.conn.execute("SELECT doc, section FROM policy_chunks").fetchall())
+        known = set(
+            self.conn.execute("SELECT doc, section FROM policy_chunks").fetchall()
+        )
         unknown = [citation(d, s) for d, s in cited if (d, s) not in known]
         if unknown:
             raise ToolError(

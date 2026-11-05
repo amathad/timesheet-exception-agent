@@ -4,6 +4,8 @@ Everything runs in one transaction that is rolled back, so the real (fastembed) 
 the database is never replaced by test vectors. Nothing here uses the driver, which commits.
 """
 
+from datetime import timedelta
+
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
@@ -322,3 +324,113 @@ def test_instructions_inside_a_case_do_not_bypass_the_rules(conn, tools, retriev
     assert all("error" in r for r in replies[1:])
     statuses = dict(conn.execute("SELECT id, status FROM exceptions").fetchall())
     assert set(statuses.values()) == {"open"}
+
+
+# Scenario: a manager asks the coordinator to "just use what they usually work"
+#
+# The rule (hand off at once; don't copy unreliable history) is only in the policy handbook,
+# and E-07's history conflict (80 then 64) only reaches the agent through find_similar_cases.
+
+USE_HISTORY_RULE = "[history_fallback > Manager asks the coordinator to use history]"
+UNRELIABLE_RULE = "[history_fallback > When history is missing or unreliable]"
+
+
+def test_find_similar_cases_shows_raw_history(retrieval):
+    e07 = retrieval.find_similar_cases(E07)["facts"]
+    assert e07["recent_hours_newest_first"] == [64.0, 80.0]
+    assert e07["last_two_periods_agree"] is False
+    e04 = retrieval.find_similar_cases(E04)["facts"]
+    assert e04["recent_hours_newest_first"] == [80.0, 80.0]
+    assert e04["last_two_periods_agree"] is True
+    assert retrieval.find_similar_cases(E06)["facts"]["recent_hours_newest_first"] == []
+
+
+@pytest.fixture
+def use_history(conn, clock):
+    """M-03 has been asked about E-04 and E-07 at 8:00 and replied 'use what they usually
+    work' at 8:15."""
+    sim = ReplySimulator(load_personas(conn), overrides={"M-03": "use_history"})
+    tools = OutreachTools(conn, clock, sim)
+    for exception_id in (E04, E07):
+        tools.send_message(
+            exception_id, "M-03", "teams", "Please approve before 10:00."
+        )
+    clock.advance(timedelta(minutes=20))
+    assert sorted(tools.deliver_replies()) == [E04, E07]
+    retrieval = RetrievalTools(
+        conn, clock, HashEmbedder(), current_exception=lambda: tools.scope
+    )
+    return tools, retrieval
+
+
+def test_use_history_reply_blocks_early_escalation(use_history):
+    tools, _ = use_history
+    # Waiting and escalating, the Module 2 reflex, is refused before 9:00: M-03 replied.
+    with pytest.raises(ToolError, match="opens at 09:00"):
+        tools.send_message(E07, "N-02", "teams", "Can you approve Gray's time?")
+
+
+def test_use_history_scenario_hands_off_with_verified_citations(conn, use_history):
+    tools, retrieval = use_history
+    reason = (
+        "Manager asked us to use usual hours, which is not an approval; handing to the"
+        f" coordinator. {USE_HISTORY_RULE} Last two periods disagree (80, then 64), so"
+        f" history should not be copied. {UNRELIABLE_RULE} Similar: P3-01, reduced schedule"
+        " confirmed at 64 hours."
+    )
+    script = iter(
+        [
+            AIMessage(
+                "", tool_calls=[call("check_replies", {"exception_id": E07}, "1")]
+            ),
+            AIMessage(
+                "",
+                tool_calls=[
+                    call(
+                        "search_policy",
+                        {"query": "manager asks coordinator to use usual hours"},
+                        "2",
+                    ),
+                    call("find_similar_cases", {"exception_id": E07}, "3"),
+                    call(
+                        "search_policy",
+                        {"query": "last two pay periods disagree 80 then 64"},
+                        "4",
+                    ),
+                ],
+            ),
+            AIMessage(
+                "",
+                tool_calls=[
+                    call(
+                        "update_status",
+                        {
+                            "exception_id": E07,
+                            "status": "needs_fallback",
+                            "reason": reason,
+                        },
+                        "5",
+                    )
+                ],
+            ),
+            AIMessage("Handed E-07 to the coordinator; its history is unreliable."),
+        ]
+    )
+    agent = build_agent(tools, ScriptedModel(messages=script), retrieval)
+    with tools.scoped(E07):
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": "Work exception 6."}]}
+        )
+    by_call = {
+        m.tool_call_id: m.content for m in result["messages"] if m.type == "tool"
+    }
+    assert "usually works" in by_call["1"]  # the reply
+    assert USE_HISTORY_RULE in by_call["2"]  # the rule, found from the handbook
+    assert (
+        '"last_two_periods_agree": false' in by_call["3"]
+    )  # the conflict, from retrieval
+    assert UNRELIABLE_RULE in by_call["4"]
+    assert tools.get_exception(E07)["status"] == "needs_fallback"
+    [row] = citation_report(conn)
+    assert row["verified"] == [USE_HISTORY_RULE, UNRELIABLE_RULE]
+    assert row["unverified"] == []

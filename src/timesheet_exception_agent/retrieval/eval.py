@@ -107,6 +107,13 @@ POLICY_GOLD = [
         "Where is every step taken on an exception written down?",
         {("reply_handling", "The audit log")},
     ),
+    (
+        (
+            "The manager can't log in today and says to just use the employee's normal"
+            " hours. Is that an approval?"
+        ),
+        {("history_fallback", "Manager asks the coordinator to use history")},
+    ),
 ]
 
 # (question, {case id, ...})
