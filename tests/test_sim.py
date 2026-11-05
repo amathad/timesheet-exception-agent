@@ -128,3 +128,22 @@ def test_same_inputs_give_same_replies():
     a = ReplySimulator(PERSONAS).on_sent(7, "M-04", "email", "Emerson Tal", at(8))
     b = ReplySimulator(PERSONAS).on_sent(7, "M-04", "email", "Emerson Tal", at(8))
     assert a == b
+
+
+def test_stalling_manager_answers_every_message_and_never_approves():
+    sim = ReplySimulator(PERSONAS, overrides={"M-01": "stalling"})
+    replies = [
+        sim.on_sent(1, "M-01", "teams", "Avery Brook", at(8, m)) for m in (0, 30, 50)
+    ]
+    assert [r.sim_time for r in replies] == [at(8, 5), at(8, 35), at(8, 55)]
+    bodies = [r.body for r in replies]
+    assert len(set(bodies)) == 3  # a different holding note each time
+    assert all("Avery Brook" in b and "approved" not in b for b in bodies)
+
+
+def test_stalling_notes_cycle_after_the_last_one():
+    sim = ReplySimulator(PERSONAS, overrides={"M-01": "stalling"})
+    first = sim.on_sent(1, "M-01", "teams", "Avery Brook", at(8)).body
+    for m in (10, 20):
+        sim.on_sent(1, "M-01", "teams", "Avery Brook", at(8, m))
+    assert sim.on_sent(1, "M-01", "teams", "Avery Brook", at(8, 30)).body == first

@@ -7,7 +7,7 @@ load_dotenv()
 
 def get_conn() -> psycopg.Connection:
     """Open a connection to the database using  DATABASE_URL environment variable."""
-    return psycopg.connect(os.getenv("DATABASE_URL"))
+    return psycopg.connect(os.getenv("DATABASE_URL"), connect_timeout=5)
 
 if __name__ == "__main__":
     with get_conn() as conn:

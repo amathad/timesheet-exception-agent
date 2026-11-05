@@ -230,3 +230,64 @@ def test_as_tools_exposes_seven_tools_and_returns_errors(tools):
         {"exception_id": E01, "status": "closed", "reason": "done"}
     )
     assert "error" in result
+
+
+def test_channel_casing_is_normalized(tools, conn):
+    result = tools.send_message(E01, "M-01", " Teams ", "Please approve.")
+    assert result["channel"] == "teams"
+    stored = conn.execute(
+        "SELECT channel FROM messages WHERE direction = 'sent'"
+    ).fetchone()
+    assert stored == ("teams",)
+
+
+def test_at_most_three_messages_to_the_same_person(tools):
+    for _ in range(3):
+        tools.send_message(E01, "M-01", "teams", "Please submit Avery's time.")
+    with pytest.raises(ToolError, match="limit is 3"):
+        tools.send_message(E01, "M-01", "teams", "Fourth reminder")
+    # The limit is per person and per exception.
+    tools.send_message(E02, "M-01", "teams", "Please approve Blake's time.")
+    tools.send_message(E01, "N-01", "teams", "Casey hasn't been able to get to it.")
+
+
+# Escalation cut-off: a manager who has replied gets until 9:00 AM
+
+
+def tools_with(conn, clock, overrides):
+    return OutreachTools(
+        conn, clock, ReplySimulator(load_personas(conn), overrides=overrides)
+    )
+
+
+def test_no_escalation_before_nine_once_the_manager_has_replied(conn, clock):
+    tools = tools_with(conn, clock, {"M-01": "stalling"})
+    tools.send_message(E01, "M-01", "teams", "Please submit Avery's time.")
+    clock.advance()
+    assert tools.check_replies(E01)["replies"]  # holding note at 08:05
+    with pytest.raises(ToolError, match="opens at 09:00"):
+        tools.send_message(E01, "N-01", "teams", "Casey is in meetings.")
+    assert tools.get_exception(E01)["status"] == "contacted"
+    # A reminder to the manager is still allowed.
+    tools.send_message(E01, "M-01", "teams", "Reminder: please submit Avery's time.")
+    clock.advance_to(LOCK - timedelta(minutes=60))  # 09:00
+    assert tools.send_message(E01, "N-01", "teams", "Casey couldn't get to it.")[
+        "status"
+    ] == ("escalated")
+
+
+def test_silent_manager_can_be_escalated_before_nine(tools, clock):
+    tools.send_message(E04, "M-03", "teams", "Please submit Dakota's time.")
+    clock.advance(timedelta(minutes=30))
+    assert tools.send_message(E04, "N-02", "teams", "Harper hasn't replied.")[
+        "role"
+    ] == ("next_level_manager")
+
+
+def test_out_of_office_manager_can_be_escalated_after_auto_reply(tools):
+    tools.send_message(E03, "M-02", "email", "Please approve Cameron's time.")
+    assert tools.check_replies(E03)["replies"][0]["body"].startswith("Automatic reply")
+    assert (
+        tools.send_message(E03, "N-01", "teams", "Devon is out.")["status"]
+        == "escalated"
+    )

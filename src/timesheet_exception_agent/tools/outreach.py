@@ -1,7 +1,10 @@
 """Mock tools for the Outreach agent, backed by the database, SimClock and ReplySimulator.
 
 Business rules are enforced here, not left to the model:
-- Messages can only go to the employee's manager, the next-level manager, or a teammate.
+- Messages can only go to the employee's manager, the next-level manager, or a teammate,
+  and at most 3 times to the same person about the same exception.
+- Before the 9:00 AM cut-off, escalating to the next-level manager is refused while the
+  frontline manager is engaged: they have replied and are not out of office.
 - Contact and escalation statuses and follow-up timers are set by code when a message is sent.
 - The agent can never approve time or close an exception. It can only record what a manager
   said (resolved, correction_requested) or hand the exception to the coordinator (needs_fallback).
@@ -26,8 +29,16 @@ from timesheet_exception_agent.sim.clock import (
 from timesheet_exception_agent.sim.personas import ReplySimulator, record_replies
 
 ACTOR = "outreach_agent"
+DRIVER = "outreach_driver"
 CHANNELS = {"email", "teams"}
 MAX_BODY = 2000
+# First message plus two reminders per person per exception (decided 2026-11-04).
+MAX_MESSAGES_PER_PERSON = 3
+# Cut-off rule (decided 2026-11-04): a frontline manager who has replied gets until 9:00 AM
+# to approve or correct, for example one stuck in meetings. Escalation opens then, and the
+# next-level manager still gets their 30 minutes with time to spare before the 10:00 AM lock.
+# Silent and out-of-office managers can be escalated earlier.
+ESCALATION_CUTOFF = MANAGER_WINDOW
 
 # How long to wait for a reply before the next check, capped at the lock while it's ahead.
 FOLLOW_UP = timedelta(minutes=30)
@@ -156,7 +167,7 @@ class OutreachTools:
 
     def check_replies(self, exception_id: int) -> dict:
         """Deliver replies that have arrived by now, then list every reply on this exception."""
-        self._deliver_due()
+        self.deliver_replies()
         rows = self.conn.execute(
             "SELECT m.id, m.person_id, e.name, m.channel, m.body, m.sim_time"
             " FROM messages m JOIN employees e ON e.id = m.person_id"
@@ -186,6 +197,7 @@ class OutreachTools:
     ) -> dict:
         """Send an email or Teams message about an exception to the manager, the next-level
         manager, or a teammate. Sets contacted/escalated status and the next check time."""
+        channel = channel.strip().lower()
         if channel not in CHANNELS:
             raise ToolError(f"channel must be one of {sorted(CHANNELS)}")
         body = body.strip()
@@ -198,7 +210,19 @@ class OutreachTools:
         if info["status"] in ("resolved", "closed"):
             raise ToolError(f"exception {exception_id} is already {info['status']}")
         role = self._role(info, person_id)
+        already_sent = self.conn.execute(
+            "SELECT count(*) FROM messages WHERE exception_id = %s AND person_id = %s"
+            " AND direction = 'sent'",
+            (exception_id, person_id),
+        ).fetchone()[0]
+        if already_sent >= MAX_MESSAGES_PER_PERSON:
+            raise ToolError(
+                f"already sent {already_sent} messages to {person_id} about exception"
+                f" {exception_id}; the limit is {MAX_MESSAGES_PER_PERSON}. Escalate or wait."
+            )
         now = self.clock.now()
+        if role == "next_level_manager" and now < ESCALATION_CUTOFF:
+            self._refuse_early_escalation(info)
 
         self.conn.execute(
             "INSERT INTO messages (exception_id, person_id, channel, direction, body, sim_time)"
@@ -287,7 +311,75 @@ class OutreachTools:
             )
         ]
 
+    # Driver hooks (code only, not exposed to the model)
+
+    def deliver_replies(self) -> list[int]:
+        """Record replies that have arrived by now; return the exceptions they belong to."""
+        replies = self.sim.due(self.clock.now())
+        record_replies(self.conn, replies)
+        for r in replies:
+            self._audit(
+                "reply_received",
+                r.exception_id,
+                f"reply from {r.person_id}",
+                {"person_id": r.person_id, "channel": r.channel},
+                when=r.sim_time,
+            )
+        return sorted({r.exception_id for r in replies})
+
+    def hand_off_unresolved(self, reason: str) -> list[int]:
+        """Deadline rule: move every exception still waiting on a manager to the coordinator."""
+        rows = self.conn.execute(
+            "SELECT id FROM exceptions WHERE status IN ('open', 'contacted', 'escalated')"
+        ).fetchall()
+        return self.hand_off([r[0] for r in rows], reason)
+
+    def hand_off(self, exception_ids: list[int], reason: str) -> list[int]:
+        """Move exceptions to needs_fallback for the coordinator, audited as the driver."""
+        ids = sorted(exception_ids)
+        if not ids:
+            return []
+        self.conn.execute(
+            "UPDATE exceptions SET status = 'needs_fallback', next_check_at = NULL"
+            " WHERE id = ANY(%s)",
+            (ids,),
+        )
+        for exception_id in ids:
+            self._audit(
+                "update_status",
+                exception_id,
+                reason,
+                {"to": "needs_fallback"},
+                actor=DRIVER,
+            )
+        return ids
+
+    def audit(
+        self,
+        action: str,
+        exception_id: int | None,
+        reason: str,
+        details: dict,
+        actor: str,
+    ) -> None:
+        self._audit(action, exception_id, reason, details, actor=actor)
+
     # Helpers
+
+    def _refuse_early_escalation(self, info: dict) -> None:
+        manager = info["manager"]
+        replied = self.conn.execute(
+            "SELECT count(*) FROM messages WHERE exception_id = %s AND person_id = %s"
+            " AND direction = 'received'",
+            (info["exception_id"], manager["id"]),
+        ).fetchone()[0]
+        out = self.get_presence(manager["id"])["status"] == "out_of_office"
+        if replied and not out:
+            raise ToolError(
+                f"{manager['name']} has replied and is not out of office, so escalation to"
+                f" the next-level manager opens at {ESCALATION_CUTOFF:%H:%M}. Send"
+                f" {manager['name']} a reminder or wait until then."
+            )
 
     def _role(self, info: dict, person_id: str) -> str:
         manager = info["manager"]
@@ -304,32 +396,21 @@ class OutreachTools:
             f" exception {info['exception_id']}"
         )
 
-    def _deliver_due(self) -> None:
-        replies = self.sim.due(self.clock.now())
-        record_replies(self.conn, replies)
-        for r in replies:
-            self._audit(
-                "reply_received",
-                r.exception_id,
-                f"reply from {r.person_id}",
-                {"person_id": r.person_id, "channel": r.channel},
-                when=r.sim_time,
-            )
-
     def _audit(
         self,
         action: str,
-        exception_id: int,
+        exception_id: int | None,
         reason: str,
         details: dict,
         when: datetime | None = None,
+        actor: str = ACTOR,
     ) -> None:
         self.conn.execute(
             "INSERT INTO audit_log (sim_time, actor, action, exception_id, reason, details)"
             " VALUES (%s, %s, %s, %s, %s, %s)",
             (
                 when or self.clock.now(),
-                ACTOR,
+                actor,
                 action,
                 exception_id,
                 reason,
@@ -341,9 +422,8 @@ class OutreachTools:
 def _safe(fn):
     """Return rule violations to the model as an error result instead of raising."""
 
-    @functools.wraps(
-        fn
-    )  # keeps the signature and type hints the tool schema is built from
+    # functools.wraps keeps the signature and type hints the tool schema is built from.
+    @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
