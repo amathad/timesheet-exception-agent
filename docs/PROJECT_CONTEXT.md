@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-04:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) not started.
+**Status as of 2026-11-04:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) in progress: corpus, pgvector store, hybrid search and evaluation built; agent tools next.
 
 ---
 
@@ -72,7 +72,8 @@ The workflow was described by a practicing payroll coordinator. **All project da
 | Database | PostgreSQL 16 in Docker Compose (`payroll-pg`, database `payroll`) |
 | Short-term memory | LangGraph checkpointer on PostgreSQL (`langgraph-checkpoint-postgres`) |
 | Long-term memory | `manager_stats` table |
-| Retrieval | pgvector in the same database (policy documents, past resolved cases). Timesheet history uses SQL, not vector search |
+| Retrieval | pgvector in the same database (policy documents, past resolved cases), hybrid with PostgreSQL full-text search via reciprocal rank fusion. Timesheet history uses SQL, not vector search |
+| Embeddings | `BAAI/bge-small-en-v1.5` through fastembed, local CPU, 384 dimensions, no API key (decided 2026-11-04). Claude has no embedding endpoint |
 | Tools | Mock tools; exposed through an MCP server in Week 4 |
 | Simulation | Simulated clock (no real waiting); manager personas: responsive, on_leave, slow, correction, silent, no_next_level |
 | Evaluation | LangSmith tracing, Rebuff for prompt injection, scenario tests vs. a fixed-reminder baseline |
@@ -89,7 +90,7 @@ timesheet-exception-agent/
 │   ├── tools/         # shared mock tools
 │   ├── db/            # schema.sql, connection.py
 │   ├── sim/           # clock, personas, synthetic data generator
-│   ├── retrieval/     # pgvector, policy docs (Week 3)
+│   ├── retrieval/     # policies/*.md, cases.py, embeddings, ingest, search, eval
 │   ├── graph.py       # LangGraph workflow (Week 5)
 │   └── mcp_server.py  # Week 4
 └── tests/
@@ -98,6 +99,8 @@ timesheet-exception-agent/
 ### Database tables
 
 `employees` (managers are employees; next-level manager = manager's manager), `coordinator_states`, `pay_periods`, `timesheet_history`, `exceptions`, `presence`, `messages`, `audit_log`, `manager_stats`, `sim_personas` (simulation only). `CHECK` constraints enforce valid statuses and channels.
+
+Retrieval tables (12 in total): `policy_chunks` and `case_memory`, each with a `vector(384)` embedding (HNSW), a generated `tsvector` (GIN), and the embedding `model` that wrote it. They're loaded by `retrieval/ingest.py` from files, not by the seed, so reseeding keeps them; `case_memory` stores employee ids as plain text, not foreign keys, for the same reason.
 
 ## 4. Build status
 
@@ -112,6 +115,8 @@ timesheet-exception-agent/
 - [x] Outreach agent with ReAct, plus the driver loop (Monday 8:00 → 10:00 AM in 10-minute steps) in `agents/outreach.py`; `tests/test_outreach_agent.py`
 - [x] First live run with Claude (`uv run python -m timesheet_exception_agent.agents.outreach`), 2026-11-03 on Haiku 5.5; see `docs/LIVE_RUNS.md`
 - [x] Outreach scenario tests with expected outcomes (silent and slow next level, stalling, ambiguous, injection) in `tests/test_outreach_agent.py`, plus live runs in `docs/LIVE_RUNS.md`. Duplicate exception and correction after lock are deferred to Intake/Triage and Supervisor
+- [x] Module 3 retrieval, PR (a): 9 synthetic policy documents (36 chunks) and 21 past cases; `policy_chunks` and `case_memory` tables; local fastembed embeddings; ingest (`uv run python -m timesheet_exception_agent.retrieval.ingest`); hybrid search; gold-set evaluation (`retrieval.eval`, results in `docs/RETRIEVAL_EVAL.md`); `tests/test_retrieval.py`
+- [ ] Module 3 retrieval, PR (b): `search_policy` and `find_similar_cases` tools for Outreach, prompt update to cite sources, live run
 
 ## 5. Evaluation plan
 
@@ -130,7 +135,7 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 
 - Model provider decided: Claude (2026-11-02). Still worth checking whether the course offers API credits
 - Confirm exact weekly module deadlines
-- Week 3: decide pgvector only, or compare with Chroma for the design write-up
+- Week 3: decide pgvector only, or compare with Chroma for the design write-up. Recommendation: pgvector only (one database, SQL joins with timesheet history), explained in the write-up
 - Seed uses 7 managers, not the 4 originally planned: each manager carries one persona, so covering all 6 personas needs at least 6
 
 ## 7. Session log
@@ -166,3 +171,10 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Merged as PR #4 (squash, `9304137`) and PR #5 (squash, `586bc5a`) into `master`; `.vscode/` added to `.gitignore` (`6986bdf`).
 - **Next:** Module 3 (RAG with pgvector: policy documents and past resolved cases in `retrieval/`). Deferred: duplicate exception (Intake/Triage, Week 4), correction after lock (Supervisor, Week 5), fixed-reminder baseline (evaluation), `manager_stats` updates.
 - **Behind schedule:** Module 3 (RAG) closed Mon Oct 26 and isn't started.
+
+### 2026-11-04 (Module 3)
+- Embedding provider decided: local fastembed (`BAAI/bge-small-en-v1.5`, 384 dimensions), so retrieval needs no extra key or cost.
+- Added `retrieval/`: 9 synthetic policy documents in `policies/` (7 coordinator-handbook documents and 2 distractors), 21 past resolved cases in `cases.py` that match the seed's people, personas and history, `embeddings.py` (`FastEmbedder`, plus `HashEmbedder` for tests), `ingest.py`, `search.py` (pgvector + full-text, reciprocal rank fusion, source citations, refuses vectors from a different model), and `eval.py`.
+- Schema: `policy_chunks` and `case_memory` (12 tables). The seed leaves them alone.
+- Evaluation on 18 policy and 7 case questions: hybrid policy recall@3 0.83 (vector 0.78, keyword 0.72), but vector has the better hit@1 (0.72 vs 0.56). Equal-weight fusion kept; see `docs/RETRIEVAL_EVAL.md`. Full suite 110 passing.
+- **Next:** PR (b): Outreach retrieval tools, prompt citations, live run.
