@@ -1,7 +1,8 @@
 """Load a small, fixed synthetic dataset for one coordinator and one state.
 
-Every name and email is invented. Re-running wipes all tables and reloads the same rows,
-so scenario tests always start from a known state.
+Every name and email is invented. Re-running wipes the simulation tables and reloads the
+same rows, so scenario tests always start from a known state. The retrieval tables
+(policy_chunks, case_memory) are left alone; retrieval/ingest.py loads them.
 
 Run: uv run python -m timesheet_exception_agent.sim.seed
 """

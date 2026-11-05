@@ -84,3 +84,50 @@ CREATE TABLE IF NOT EXISTS sim_personas (
   persona     TEXT NOT NULL CHECK (persona IN
               ('responsive','on_leave','slow','correction','silent','no_next_level'))
 );
+
+-- Retrieval (Module 3). The corpus comes from files (retrieval/policies/*.md and
+-- retrieval/cases.py) and is loaded by retrieval/ingest.py, not by the seed, so reseeding the
+-- simulation keeps it. `model` records which embedding model wrote each vector; search
+-- refuses to compare a query against vectors from a different model.
+
+CREATE TABLE IF NOT EXISTS policy_chunks (
+  id         SERIAL PRIMARY KEY,
+  doc        TEXT NOT NULL,            -- policy file name without .md
+  title      TEXT NOT NULL,            -- the document's # heading
+  section    TEXT NOT NULL,            -- the ## heading, with a part number if split
+  body       TEXT NOT NULL,
+  model      TEXT NOT NULL,
+  embedding  vector(384) NOT NULL,
+  tsv        tsvector GENERATED ALWAYS AS
+             (to_tsvector('english', title || ' ' || section || ' ' || body)) STORED,
+  UNIQUE (doc, section)
+);
+CREATE INDEX IF NOT EXISTS policy_chunks_embedding_idx
+  ON policy_chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS policy_chunks_tsv_idx ON policy_chunks USING gin (tsv);
+
+-- Past resolved exceptions from earlier pay periods. Employee and manager ids are kept as
+-- plain text, not foreign keys: case history outlives the people in it, and the seed's
+-- TRUNCATE ... CASCADE on employees would otherwise wipe it.
+CREATE TABLE IF NOT EXISTS case_memory (
+  id              TEXT PRIMARY KEY,      -- e.g. 'P3-04'
+  period_end      DATE NOT NULL,
+  employee_id     TEXT NOT NULL,
+  manager_id      TEXT,
+  exception_type  TEXT NOT NULL CHECK (exception_type IN
+                  ('not_submitted','not_approved','unusual_hours')),
+  situation       TEXT NOT NULL,
+  resolution      TEXT NOT NULL,
+  outcome         TEXT NOT NULL CHECK (outcome IN
+                  ('manager_approved','next_level_approved','correction',
+                   'history_fallback','team_confirmed','standard_hours')),
+  hours_entered   NUMERIC(5,2),
+  retro           BOOLEAN NOT NULL DEFAULT false,
+  model           TEXT NOT NULL,
+  embedding       vector(384) NOT NULL,
+  tsv             tsvector GENERATED ALWAYS AS
+                  (to_tsvector('english', situation || ' ' || resolution)) STORED
+);
+CREATE INDEX IF NOT EXISTS case_memory_embedding_idx
+  ON case_memory USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS case_memory_tsv_idx ON case_memory USING gin (tsv);
