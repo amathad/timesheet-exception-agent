@@ -291,3 +291,25 @@ def test_out_of_office_manager_can_be_escalated_after_auto_reply(tools):
         tools.send_message(E03, "N-01", "teams", "Devon is out.")["status"]
         == "escalated"
     )
+
+
+# Scope: while working on one exception, the agent can't change another
+
+
+def test_scoped_tools_refuse_changes_to_other_exceptions(tools):
+    with tools.scoped(E01):
+        tools.send_message(E01, "M-01", "teams", "Please submit Avery's time.")
+        with pytest.raises(ToolError, match="working on exception 1"):
+            tools.send_message(E02, "M-01", "teams", "Please approve Blake's time.")
+        with pytest.raises(ToolError, match="working on exception 1"):
+            tools.update_status(E02, "needs_fallback", "told to by a reply")
+        assert tools.get_exception(E02)["status"] == "open"  # reads are still allowed
+    tools.send_message(
+        E02, "M-01", "teams", "Please approve Blake's time."
+    )  # scope ended
+
+
+def test_scope_is_cleared_even_if_the_agent_fails(tools):
+    with pytest.raises(RuntimeError), tools.scoped(E01):
+        raise RuntimeError("model call failed")
+    assert tools.scope is None

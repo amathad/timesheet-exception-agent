@@ -199,7 +199,8 @@ class OutreachDriver:
     def tick(self) -> list[tuple[Wake, str]]:
         done = []
         for wake in self.due():
-            summary = self.act(wake)
+            with self.tools.scoped(wake.exception_id):
+                summary = self.act(wake)
             self.tools.audit(
                 "agent_turn",
                 wake.exception_id,
