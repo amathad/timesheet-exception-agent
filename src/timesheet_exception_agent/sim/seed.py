@@ -89,7 +89,7 @@ EXCEPTIONS = [
 ]
 
 TABLES = [
-    "audit_log", "messages", "sim_personas", "manager_stats", "presence",
+    "estimates", "audit_log", "messages", "sim_personas", "manager_stats", "presence",
     "exceptions", "timesheet_history", "pay_periods", "coordinator_states", "employees",
 ]
 

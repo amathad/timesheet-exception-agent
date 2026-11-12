@@ -79,6 +79,28 @@ CREATE TABLE IF NOT EXISTS manager_stats (
   updated_at        TIMESTAMPTZ NOT NULL
 );
 
+-- Estimator (Module 4): one fallback proposal per exception, written by code. The Estimator
+-- only proposes; approved_by/approved_at stay empty until the coordinator approves through the
+-- Supervisor's approval gate (Week 5). path: copy history; try a teammate first with
+-- standard hours as the backup; or standard hours alone when there is no teammate on file.
+-- A proposal is withdrawn if a manager decides after all.
+CREATE TABLE IF NOT EXISTS estimates (
+  id            SERIAL PRIMARY KEY,
+  exception_id  INT  NOT NULL UNIQUE REFERENCES exceptions(id),
+  path          TEXT NOT NULL CHECK (path IN ('history','teammate','standard_hours')),
+  method        TEXT NOT NULL CHECK (method IN ('history','standard_hours')),
+  hours         NUMERIC(5,2) NOT NULL CHECK (hours >= 0),
+  pay_code      TEXT NOT NULL,
+  confidence    NUMERIC(3,2) NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+  reason        TEXT NOT NULL,
+  basis         JSONB NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'proposed'
+                CHECK (status IN ('proposed','approved','edited','rejected','withdrawn')),
+  proposed_at   TIMESTAMPTZ NOT NULL,
+  approved_by   TEXT,
+  approved_at   TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS sim_personas (
   manager_id  TEXT PRIMARY KEY REFERENCES employees(id),
   persona     TEXT NOT NULL CHECK (persona IN
