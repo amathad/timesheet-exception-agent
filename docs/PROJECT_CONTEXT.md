@@ -139,7 +139,7 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 ## 6. Open items
 
 - Model provider decided: Claude (2026-11-02). Still worth checking whether the course offers API credits
-- Confirm exact weekly module deadlines
+- Module deadlines (resolved 2026-11-12): modules have no hard deadlines of their own; everything must be complete by the course deadline. Build order follows the design, not the module numbers. The exact course deadline date is still to be recorded
 - Week 3: decide pgvector only, or compare with Chroma for the design write-up. Recommendation: pgvector only (one database, SQL joins with timesheet history), explained in the write-up
 - Seed uses 7 managers, not the 4 originally planned: each manager carries one persona, so covering all 6 personas needs at least 6
 - Retrieval ranking (2026-11-05): the best rule for E-06 ranks outside the top 3, and 3 of 19 gold-set policy questions miss. Consider a reranker once the gold set is larger
@@ -222,5 +222,6 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Live run Q on Haiku (`N-02=silent`, in `docs/LIVE_RUNS.md`). Outreach outcomes matched runs 3 and G. E-04 got the history path (80 h at 0.95); E-07 and E-06 got the teammate path (80 h standard at 0.30). Nothing was approved and no status was changed by the Estimator. Printed hours fixed from `80.00` to `80`.
 - Merged as PR #8 (squash, `b0ef35b`) into `master`.
 - Open: for E-06 the Estimator still says to ask E-09, although Outreach already emailed E-09 (the Estimator doesn't read `messages`). The default-morning withdrawal hasn't been run live; a test covers it. The repo has no CI, so tests run only locally.
+- Confirmed with the user: modules have no hard deadlines of their own, only the course deadline for the whole project. So gated ToT stays after `graph.py` and the Supervisor, as planned on 2026-11-10, and the deadline open item is closed.
 - **Next:** `graph.py` with Intake and the rule-based router, then the LLM Supervisor and its A/B against the router, then gated ToT in the Estimator, then the MCP server.
-- **Behind schedule:** Module 4 still lacks gated ToT and the MCP server. Checkpoints 4.1 and 5.1 were submitted as designs. Confirm the Module 4 deadline (open item).
+- **Behind schedule:** not against module dates, which aren't binding. Still to build before the course deadline: `graph.py` and Intake, the Supervisor, gated ToT, and the MCP server. Checkpoints 4.1 and 5.1 were submitted as designs.
