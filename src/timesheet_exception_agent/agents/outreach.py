@@ -26,6 +26,7 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 
+from timesheet_exception_agent.agents.estimator import Estimator
 from timesheet_exception_agent.sim.clock import LOCK, SimClock
 from timesheet_exception_agent.sim.personas import REPLIES
 from timesheet_exception_agent.tools.outreach import (
@@ -192,12 +193,20 @@ class OutreachDriver:
     """Steps the simulated clock and wakes the agent for exceptions that need attention."""
 
     def __init__(
-        self, conn, clock: SimClock, tools: OutreachTools, act: Callable[[Wake], str]
+        self,
+        conn,
+        clock: SimClock,
+        tools: OutreachTools,
+        act: Callable[[Wake], str],
+        estimator: Estimator | None = None,
     ):
         self.conn = conn
         self.clock = clock
         self.tools = tools
         self.act = act
+        # With an Estimator, every hand-off (agent, 30-minute timeout or lock) gets a
+        # fallback proposal at the end of the tick, and a late manager decision withdraws it.
+        self.estimator = estimator
         self._cutoff_woken: set[int] = set()
 
     def due(self) -> list[Wake]:
@@ -254,8 +263,13 @@ class OutreachDriver:
             )
             self.conn.commit()
             done.append((wake, summary))
+        self._estimate()
         self.conn.commit()
         return done
+
+    def _estimate(self) -> None:
+        if self.estimator is not None:
+            self.estimator.sync()
 
     def run(
         self, until=LOCK, on_tick: Callable | None = None, details: dict | None = None
@@ -281,6 +295,7 @@ class OutreachDriver:
         handed_off = self.tools.hand_off_unresolved(
             "lock reached with no manager decision; coordinator takes over"
         )
+        self._estimate()
         self.conn.commit()
         return handed_off
 
@@ -422,7 +437,13 @@ if __name__ == "__main__":
                 conn, clock, embedder, current_exception=lambda: tools.scope
             )
         agent = build_agent(tools, retrieval=retrieval)
-        driver = OutreachDriver(conn, clock, tools, agent_act(agent, clock, retrieval))
+        driver = OutreachDriver(
+            conn,
+            clock,
+            tools,
+            agent_act(agent, clock, retrieval),
+            estimator=Estimator(conn, clock),
+        )
 
         def show(now, done):
             for wake, summary in done:
@@ -443,6 +464,15 @@ if __name__ == "__main__":
             "SELECT id, employee_id, status FROM exceptions ORDER BY id"
         ):
             print(f"  #{exception_id} {employee}  {status}")
+        print("\nEstimator proposals (proposals only; the coordinator approves):")
+        for exception_id, path, hours, code, confidence, status in conn.execute(
+            "SELECT exception_id, path, hours, pay_code, confidence, status"
+            " FROM estimates ORDER BY exception_id"
+        ):
+            print(
+                f"  #{exception_id} {path:<14} {hours:g} h {code}"
+                f"  confidence {confidence}  {status}"
+            )
         if retrieval:
             calls = dict(
                 conn.execute(

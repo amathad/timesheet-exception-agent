@@ -104,6 +104,8 @@ timesheet-exception-agent/
 
 Retrieval tables (12 in total): `policy_chunks` and `case_memory`, each with a `vector(384)` embedding (HNSW), a generated `tsvector` (GIN), and the embedding `model` that wrote it. They're loaded by `retrieval/ingest.py` from files, not by the seed, so reseeding keeps them; `case_memory` stores employee ids as plain text, not foreign keys, for the same reason.
 
+Estimator table (13 in total): `estimates`, one fallback proposal per exception (path, method, hours, pay code, confidence, reason, basis, status `proposed`/`withdrawn`/`approved`/`edited`/`rejected`). `approved_by` and `approved_at` stay empty until the Supervisor's approval gate. The seed clears it.
+
 ## 4. Build status
 
 - [x] Checkpoint 1.1 written (745 words)
@@ -119,6 +121,7 @@ Retrieval tables (12 in total): `policy_chunks` and `case_memory`, each with a `
 - [x] Outreach scenario tests with expected outcomes (silent and slow next level, stalling, ambiguous, injection) in `tests/test_outreach_agent.py`, plus live runs in `docs/LIVE_RUNS.md`. Duplicate exception and correction after lock are deferred to Intake/Triage and Supervisor
 - [x] Module 3 retrieval, PR (a): 9 synthetic policy documents (36 chunks; 37 after PR (b)) and 21 past cases (22 after PR (b)); `policy_chunks` and `case_memory` tables; local fastembed embeddings; ingest (`uv run python -m timesheet_exception_agent.retrieval.ingest`); hybrid search; gold-set evaluation (`retrieval.eval`, results in `docs/RETRIEVAL_EVAL.md`); `tests/test_retrieval.py`
 - [x] Module 3 retrieval, PR (b): `search_policy` and `find_similar_cases` in `tools/retrieval.py` (audited), wired into Outreach with a citation prompt (`--no-retrieval` for the Module 2 agent), citation guard in `update_status`, `citation_report`; `tests/test_retrieval_tools.py`; live runs F–H in `docs/LIVE_RUNS.md`; `use_history` A/B scenario (runs I and J) where retrieval changes the handling; fixes after run I (driver retrieves policy for every reply, `history_check` in code, citations must be retrieved for the exception) checked in runs K–P
+- [x] Module 4 minimal Estimator (code only, no model, no ToT) in `agents/estimator.py`: for each exception at `needs_fallback`, proposes hours, pay code and confidence from the last two closed pay periods (`history_check` plus a pay-code check); history that fails goes to the teammate path with standard hours for the job type as the backup (standard hours alone if no teammate can be asked; teammates with an open exception of their own are excluded). Proposals only, in the new `estimates` table (13 tables); audited as actor `estimator`; withdrawn if a manager decides later. Hooked into `OutreachDriver(..., estimator=...)` and the live-run script; `tests/test_estimator.py` (26). Full suite 161 passing
 
 ## 5. Evaluation plan
 
@@ -195,3 +198,14 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Open: the best rule for E-06 ranks outside the top 3, and 3 gold-set questions miss (`docs/RETRIEVAL_EVAL.md`). Both need a reranker and a larger gold set.
 - **Next:** Module 4: Estimator (hours from the last two pay periods in code, building on `history_check`, with `find_similar_cases` feeding its explanations). Still deferred: duplicate exception (Intake/Triage, Week 4), correction after lock (Supervisor, Week 5), fixed-reminder baseline (evaluation), `manager_stats` updates.
 - **Behind schedule:** Module 3 (RAG) closed Mon Oct 26 and was finished Nov 5. Confirm the Module 4 deadline (open item).
+
+### 2026-11-10 (Module 5, design only)
+- Wrote and submitted Checkpoint 5.1 (Multi-Agent Architecture and Coordination Plan), checked against the repo. No code changes.
+- Design decided with the user:
+  - Three LLM agents (Outreach built; Estimator and Supervisor planned), plus Intake/Triage as code only (dedupe, group exceptions by manager, lock-risk score).
+  - Supervisor is an LLM agent with a fixed tool set: apply facts across a manager's exceptions (escalate all at once), merge messages to the same manager, reprioritize near the lock, check each estimate against the manager's replies (at most one send-back), write the approval queue. Tools refuse illegal moves (after lock, over message caps, approving time). Called only on events (reply, hand-off, new estimate).
+  - A rule-based router is both the fallback and the baseline: keep the LLM Supervisor only if it beats the router on the same scenarios enough to justify calls and latency.
+  - LangGraph graph advances one shared simulated clock in 10-minute steps; exceptions that need attention at a step run Outreach in parallel. Typed state, checkpointed to PostgreSQL; coordinator approval pause.
+- Open: per-manager batching changes Outreach's per-exception scoping and the 3-messages-per-person cap; keep the scoping protection (one interpretation and status per exception).
+- **Next:** minimal Estimator (hours from last two pay periods via history_check, no ToT) → graph.py with Intake and the rule-based router → LLM Supervisor and A/B vs router → gated ToT in Estimator → MCP server.
+- **Behind schedule:** Module 4 build (Estimator, ToT, MCP server) not started; Checkpoints 4.1 and 5.1 submitted as designs.
