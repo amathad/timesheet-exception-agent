@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-05:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Next: Module 4 (Estimator).
+**Status as of 2026-11-12:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 in progress: the minimal code-only Estimator is merged and tested live. Next: `graph.py` with Intake and the rule-based router.
 
 ---
 
@@ -209,3 +209,18 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Open: per-manager batching changes Outreach's per-exception scoping and the 3-messages-per-person cap; keep the scoping protection (one interpretation and status per exception).
 - **Next:** minimal Estimator (hours from last two pay periods via history_check, no ToT) → graph.py with Intake and the rule-based router → LLM Supervisor and A/B vs router → gated ToT in Estimator → MCP server.
 - **Behind schedule:** Module 4 build (Estimator, ToT, MCP server) not started; Checkpoints 4.1 and 5.1 submitted as designs.
+
+### 2026-11-12 (Module 4)
+- Added the 2026-11-10 entry above, as written by the user.
+- Defaults confirmed with the user: the minimal Estimator is code only, and the model's part (explaining estimates, reasoning through conflicting history) comes with gated ToT later. The teammate path is recorded on the estimate, so the exception stays at `needs_fallback`. Confidence values 0.95 / 0.90 / 0.80 / 0.30 are placeholders for the feedback loop to tune.
+- Added `agents/estimator.py`.
+  - Pure rules: `decide`, `pay_code_check`, `history_confidence`, `standard_hours`, prorated over weekdays from the hire date.
+  - `Estimator.sync`, called by `OutreachDriver(..., estimator=...)` after each tick and after the lock hand-off. It proposes for every exception at `needs_fallback` and withdraws a proposal if a manager decides later.
+  - Paths: `history` (the last two periods pass `history_check` and have the same pay code), `teammate` with standard hours as the backup, or `standard_hours` alone when no teammate can be asked.
+  - The new `estimates` table (13 tables): proposals only, never approved, and each proposal, withdrawal and skip is audited as actor `estimator`. The live-run script prints the proposals.
+- After reviewing the diff, the user decided to exclude teammates who have an open exception of their own. E-07's teammates are now only E-10; E-04 is kept in the basis as excluded. `tests/test_estimator.py` (26, no API calls). Full suite 161 passing.
+- Live run Q on Haiku (`N-02=silent`, in `docs/LIVE_RUNS.md`). Outreach outcomes matched runs 3 and G. E-04 got the history path (80 h at 0.95); E-07 and E-06 got the teammate path (80 h standard at 0.30). Nothing was approved and no status was changed by the Estimator. Printed hours fixed from `80.00` to `80`.
+- Merged as PR #8 (squash, `b0ef35b`) into `master`.
+- Open: for E-06 the Estimator still says to ask E-09, although Outreach already emailed E-09 (the Estimator doesn't read `messages`). The default-morning withdrawal hasn't been run live; a test covers it. The repo has no CI, so tests run only locally.
+- **Next:** `graph.py` with Intake and the rule-based router, then the LLM Supervisor and its A/B against the router, then gated ToT in the Estimator, then the MCP server.
+- **Behind schedule:** Module 4 still lacks gated ToT and the MCP server. Checkpoints 4.1 and 5.1 were submitted as designs. Confirm the Module 4 deadline (open item).
