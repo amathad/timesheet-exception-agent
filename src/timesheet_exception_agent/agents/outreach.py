@@ -470,7 +470,7 @@ if __name__ == "__main__":
             " FROM estimates ORDER BY exception_id"
         ):
             print(
-                f"  #{exception_id} {path:<14} {hours:g} h {code}"
+                f"  #{exception_id} {path:<14} {float(hours):g} h {code}"
                 f"  confidence {confidence}  {status}"
             )
         if retrieval:

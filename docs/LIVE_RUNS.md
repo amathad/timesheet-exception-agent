@@ -1,6 +1,6 @@
 # Live Runs: Outreach Agent
 
-Results of live runs of the Outreach agent against the real model during Modules 2 and 3, and what each run changed. Referenced from the session log in `docs/PROJECT_CONTEXT.md`. All data is synthetic (the seed in `sim/seed.py`).
+Results of live runs of the Outreach agent against the real model during Modules 2 to 4 (with the Estimator from Module 4), and what each run changed. Referenced from the session log in `docs/PROJECT_CONTEXT.md`. All data is synthetic (the seed in `sim/seed.py`).
 
 ## How to run
 
@@ -38,6 +38,7 @@ All runs on Claude Haiku 5.5, effort medium.
 | K, L, M | 2026-11-05 | `M-03=use_history`, after fixes 1–3 | 3 of 3: both exceptions handed off on the first turn after the reply (08:20), unreliable-history rule cited, P3-01 mentioned; run K cited a section it hadn't retrieved |
 | N | 2026-11-05 | none, after fixes 1–3 | same outcomes as runs F and H |
 | O, P | 2026-11-05 | `M-03=use_history`, then none, after the stricter citation guard | as K–M and N; every citation retrieved, no refusals |
+| Q | 2026-11-12 | `N-02=silent`, with retrieval and the Estimator | same outcomes as runs 3 and G; Estimator proposed for all 3 hand-offs (E-04 history 80 h at 0.95; E-07 and E-06 teammate path, 80 h standard at 0.30); nothing approved |
 
 ## Run 1 (2026-11-03): first live run
 
@@ -202,3 +203,26 @@ The `--no-retrieval` agent's prompt is unchanged, so run J is still a valid base
 - Runs O (`use_history`) and P (default) after this change: same outcomes as K–M and N, every citation retrieved, and no refusals.
 
 Still open: the best rule for E-06 ranks outside the top 3, and 3 gold-set questions miss (see `docs/RETRIEVAL_EVAL.md`). Both need a better ranker and a larger gold set.
+
+## Run Q (2026-11-12): the Estimator on the fallback path (Module 4)
+
+`--override N-02=silent`, with retrieval, after adding the code-only Estimator (`agents/estimator.py`, hooked into `OutreachDriver`). The Estimator has no model calls; the Outreach agent is unchanged. Checked in `estimates`, `audit_log` and `messages`.
+
+**Outreach outcomes:** same as runs 3 and G. E-01, E-02, E-03, E-08 resolved; E-05 correction_requested (72 h); E-04/E-07 contacted at 08:00 (M-03), escalated to N-02 at 08:30, handed to the coordinator by the code timeout at 09:00; E-06 handed off by the agent at 08:00 (manager out, no next level) after emailing teammate E-09. 15 agent turns, 10 messages, both citations retrieved.
+
+**Estimator proposals** (each written in the same tick as its hand-off, actor `estimator`):
+
+| Exception | Hand-off | Path | Proposal | Confidence | Teammates (excluded) |
+| --- | --- | --- | --- | --- | --- |
+| E-04 | 09:00, driver timeout | history | 80 h REG, copied from 80 / 80 | 0.95 (third period also 80) | E-10 (E-07) |
+| E-07 | 09:00, driver timeout | teammate, then standard hours | 80 h REG standard (10 weekdays × 8 h) | 0.30 | E-10 (E-04) |
+| E-06 | 08:00, agent | teammate, then standard hours | 80 h REG standard (hired on the period's first day) | 0.30 | E-09 |
+
+- All three stayed `proposed` with `approved_by` and `approved_at` empty; no exception status was changed by the Estimator and it sent no messages. 3 `propose_estimate` audit rows, each reason citing the handbook rule it applied; no `estimate_skipped`.
+- E-07's history conflict (80, then 64) is stated in the reason with the unreliable-history rule; E-04, which has its own open exception, is excluded from E-07's teammates.
+
+**Finding (open):** for E-06 the Outreach agent had already emailed teammate E-09 at 08:00, and the Estimator's reason still says to ask E-09 first. The Estimator doesn't read `messages`, so it can't tell that the teammate step is under way. Worth handling when the Supervisor checks estimates against messages and replies (planned), or by having the Estimator note teammates already contacted.
+
+**Fix after the run:** the live-run script printed proposal hours as `80.00`; it now prints `80`.
+
+The default morning (N-02 slow, which should withdraw E-04/E-07's proposals after N-02's late approval) is covered by `test_driver_withdraws_after_late_next_level_approval` but hasn't been run live.
