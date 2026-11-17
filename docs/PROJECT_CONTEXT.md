@@ -256,6 +256,6 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
   - The baseline's turn count includes no-op wakes after the cap.
   - Wakes within a tick are still sequential.
   - The approval gate takes decisions on the console or from a file; the LLM Supervisor will own the queue.
-- Not merged yet; no PR opened.
+- Merged as PR #9 (squash, `95402e0`) into `master`.
 - **Next:** LLM Supervisor with message merging (show the scoping design before coding it), then its A/B against the router.
 - **Behind schedule:** on plan for the 2026-11-16 slot (graph, Intake, router, baseline). Still to build: the LLM Supervisor, the A/B, gated ToT, the MCP server, then the evaluation tables, report and video.
