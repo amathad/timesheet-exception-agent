@@ -291,6 +291,6 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
   - Supervisor calls run between the parallel steps and roughly double wall time.
   - Its group escalation adds nothing once messages are merged, since the merged reply reaches every exception. It would matter when a manager's exceptions are contacted at different times; covered by tests only.
   - The Outreach prompt changed (leave recording, merged replies), so earlier runs are not exactly comparable.
-- Not merged yet; no PR opened.
+- Merged as PR #10 (squash, `7e0f2f7`) into `master`.
 - **Next:** the Supervisor A/B against the router on the same scenarios (default, `N-02=silent`, stalling, injection, `use_history`, duplicate, `on_leave_teams`), measuring decisions before the lock, wrong resolutions, messages, coordinator interventions, model calls, tokens and latency. Then gated ToT and the MCP server.
 - **Behind schedule:** on plan for the 2026-11-17 slot. Still to build: the A/B, gated ToT, the MCP server, then the evaluation tables, report and video.
