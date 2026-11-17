@@ -232,6 +232,23 @@ def test_teammates_with_open_exceptions_are_excluded(conn, tools, estimator):
     assert basis["teammates"] == ["E-10"] and basis["teammates_excluded"] == ["E-04"]
 
 
+def test_teammate_already_asked_is_not_asked_again(conn, tools, estimator):
+    # Run Q finding: Outreach emailed E-09 about E-06, and the proposal still said to ask.
+    tools.send_message(E06, "E-09", "email", "Can you confirm Finley's hours?")
+    tools.hand_off([E06], "test hand-off")
+    estimator.sync()
+    reason, basis = conn.execute(
+        "SELECT reason, basis FROM estimates WHERE exception_id = %s", (E06,)
+    ).fetchone()
+    assert "E-09 was already asked" in reason and "Ask a teammate" not in reason
+    assert basis["teammates_contacted"] == ["E-09"]
+
+
+def test_duplicate_exception_does_not_exclude_a_teammate(conn, estimator):
+    conn.execute("UPDATE exceptions SET status = 'duplicate' WHERE id = %s", (E04,))
+    assert estimator.load_facts(E07).teammates == ["E-04", "E-10"]
+
+
 def test_teammate_becomes_eligible_once_their_exception_is_resolved(conn, estimator):
     conn.execute("UPDATE exceptions SET status = 'resolved' WHERE id = %s", (E04,))
     assert estimator.load_facts(E07).teammates == ["E-04", "E-10"]

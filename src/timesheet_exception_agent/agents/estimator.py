@@ -82,6 +82,8 @@ class Facts:
     teammates: list[str] = field(default_factory=list)  # who can be asked
     # Teammates left out because they have an open exception of their own this period.
     teammates_excluded: list[str] = field(default_factory=list)
+    # Teammates already messaged about this exception (by Outreach), from `messages`.
+    teammates_contacted: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,7 @@ def decide(facts: Facts) -> Proposal:
         "history_note": note,
         "teammates": facts.teammates,
         "teammates_excluded": facts.teammates_excluded,
+        "teammates_contacted": facts.teammates_contacted,
     }
     if note is None:
         hours, code = recent[0].hours, recent[0].pay_code
@@ -179,7 +182,14 @@ def decide(facts: Facts) -> Proposal:
         f"standard hours: {hours:g} hours {facts.pay_code} ({days} weekdays at"
         f" {per_day:g} hours). {STANDARD_RULE}"
     )
-    if facts.teammates:
+    if facts.teammates_contacted:
+        path = "teammate"
+        step = (
+            f" Teammate {', '.join(facts.teammates_contacted)} was already asked about"
+            f" this exception; wait for their answer. {TEAMMATE_RULE} If nobody confirms"
+            f" by end of day Monday, enter {standard}"
+        )
+    elif facts.teammates:
         path = "teammate"
         step = (
             f" Ask a teammate ({', '.join(facts.teammates)}) first. {TEAMMATE_RULE} If"
@@ -242,11 +252,21 @@ class Estimator:
         for t_id, has_open in self.conn.execute(
             "SELECT t.id, EXISTS (SELECT 1 FROM exceptions o WHERE o.employee_id = t.id"
             "   AND o.pay_period_id = (SELECT pay_period_id FROM exceptions WHERE id = %s)"
-            "   AND o.status NOT IN ('resolved', 'closed'))"
+            "   AND o.status NOT IN ('resolved', 'closed', 'duplicate'))"
             " FROM employees t WHERE t.manager_id = %s AND t.id <> %s ORDER BY t.id",
             (exception_id, manager_id, emp_id),
         ):
             (excluded if has_open else teammates).append(t_id)
+        # Teammates Outreach has already messaged about this exception, so the proposal
+        # says to wait for their answer instead of asking again.
+        contacted = [
+            p_id
+            for (p_id,) in self.conn.execute(
+                "SELECT DISTINCT person_id FROM messages WHERE exception_id = %s"
+                " AND direction = 'sent' AND person_id = ANY(%s::text[]) ORDER BY person_id",
+                (exception_id, teammates),
+            )
+        ]
         return Facts(
             exception_id=exception_id,
             status=status,
@@ -259,6 +279,7 @@ class Estimator:
             history=history,
             teammates=teammates,
             teammates_excluded=excluded,
+            teammates_contacted=contacted,
         )
 
     def propose(self, exception_id: int) -> Proposal:
