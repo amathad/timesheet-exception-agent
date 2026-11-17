@@ -243,12 +243,12 @@ def run_once(agent):
 
 def test_agent_gets_retrieval_tools_and_prompt_only_when_given(tools, retrieval):
     run_once(build_agent(tools, ScriptedModel(messages=iter([AIMessage("ok")]))))
-    assert len(BOUND) == 7
+    assert len(BOUND) == 8
     run_once(
         build_agent(tools, ScriptedModel(messages=iter([AIMessage("ok")])), retrieval)
     )
     assert BOUND[-2:] == ["search_policy", "find_similar_cases"]
-    assert len(BOUND) == 9
+    assert len(BOUND) == 10
     assert RETRIEVAL_PROMPT.strip().startswith("Looking things up")
     assert "search_policy" not in SYSTEM_PROMPT
 

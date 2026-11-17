@@ -93,7 +93,7 @@ EXCEPTIONS = [
 DUPLICATE = ("E-01", "not_approved")
 
 TABLES = [
-    "triage", "estimates", "audit_log", "messages", "sim_personas", "manager_stats", "presence",
+    "outbox", "triage", "estimates", "audit_log", "messages", "sim_personas", "manager_stats", "presence",
     "exceptions", "timesheet_history", "pay_periods", "coordinator_states", "employees",
 ]
 

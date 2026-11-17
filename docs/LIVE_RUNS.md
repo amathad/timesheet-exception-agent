@@ -247,3 +247,42 @@ First runs of `graph.py` (`uv run python -m timesheet_exception_agent.graph`): I
 - **Baseline turn count:** the baseline's 39 turns include wakes after the message cap, where it can do nothing; they are code turns with no model cost, so the count isn't comparable to the agent's.
 - **Found and fixed during the runs:** (1) PowerShell puts a byte-order mark in front of piped stdin, so the first initials were refused (the gate refused them cleanly). The prompt now strips the mark and checks initials up front. (2) Risk wasn't rescored after approvals, so a closed exception showed 1.0; the approve node now rescores.
 - `PostgresSaver.setup()` adds four LangGraph tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) to the database: 18 tables in all.
+
+## Runs U1 to W2 (2026-11-17): parallel Outreach, merged delivery and the LLM Supervisor (Module 5)
+
+First runs with:
+- Outreach wakes fanned out in parallel (LangGraph `Send`, `max_concurrency` 4, each task with its own connection, tools and scope);
+- drafts queued in the outbox and merged at the end of the tick (router template, or the Supervisor's body after code checks);
+- the LLM Supervisor (review, merge and queue calls) wrapping the rule-based router.
+
+All runs are on Haiku 5.5 with retrieval. As in runs R to T, the coordinator's decisions were piped in with synthetic initials `TC` (approve everything). Results were checked in `exceptions`, `messages`, `estimates` and `audit_log`. Wall time is to the lock, excluding the approval pause.
+
+| Run | Setup | Outcome | Messages per exception / delivered | Outreach turns (model time) | Supervisor calls (tokens in / out) | Wall time |
+| --- | --- | --- | --- | --- | --- | --- |
+| U1 | default, router, parallel 4 | same as R: 6 resolved, E-05 correction, E-06 to the coordinator | 10 / 6 | 17 (83 s) | – | **36 s** |
+| U2 | default, router, `--sequential` | identical to U1 | 10 / 6 | 17 (83 s) | – | 87 s |
+| V | default, Supervisor | identical to U1 | 10 / 6 | 17 (90 s) | 8 (50.7k / 7.0k) | 82 s |
+| W0 | `M-01=on_leave_teams`, router | all 7 decided by managers, E-06 to the coordinator | 12 / 7 | 19 (104 s) | – | 40 s |
+| W | `M-01=on_leave_teams`, Supervisor | **E-07 missed the lock** (see finding 1) | 13 / 8 | 19 (109 s) | 9 (65.2k / 8.7k) | 97 s |
+| W2 | as W, after the fixes | same as W0 | 12 / 7 | 19 (106 s) | 9 (55.8k / 7.9k) | 86 s |
+
+- **Parallel:** U1 and U2 reached identical outcomes and message counts. Parallel was 2.4 times faster in wall time (36 s against 87 s) for the same model time. With the Supervisor, wall time rose to 82–97 s, because its calls run between the parallel steps, at the start and end of each tick.
+- **Merging:**
+  - The router's template merged M-01's, N-01's, M-03's and N-02's pairs, cutting deliveries from 10 to 6 on the default morning.
+  - The Supervisor's merged bodies were well written and passed the checks. One named an employee's job type ("part-time hourly"), which is allowed but unnecessary.
+  - Each merged message got one reply, filed on both exceptions.
+- **Leave replies (W0, W, W2):** M-01 answered the merged Teams message once with "I'm on leave today and tomorrow". The agent called `record_manager_leave` on both exceptions and escalated to N-01 at 08:10, which was refused before this change (the manager had replied and presence was available). N-01 approved at 08:20.
+- **Supervisor in V:** its review calls found nothing to change, apart from two `escalate_group` calls for M-05 that woke nothing. Its queue note on E-06 was sensible. It added cost and latency but changed no outcome on the default morning.
+
+**Finding 1 (run W, fixed):** N-02 answered the merged escalation with one reply naming both employees ("Dakota Reyes and Gray Nakamura's time is approved").
+- The agent on E-04 resolved it.
+- The agent on E-07 called the same reply "ambiguous", emailed N-02 again, and E-07 reached the lock unresolved. In W0 the same kind of reply resolved both, so this is run-to-run variation.
+- The cause is that a reply naming several employees looks suspicious to an agent that works one exception and treats reply text as untrusted.
+- The Supervisor's queue note caught it: N-02 had approved Gray's time, but the exception was never resolved.
+- **Fix:** `check_replies` now marks a reply that answers a merged message (`answers_merged_message_about`, with the employees it covered), and the Outreach prompt says such a reply applies to this exception when it names this employee. In W2 both exceptions resolved at 09:50, with the agent citing that rule.
+
+**Finding 2 (fixed):**
+- In W the Supervisor called `escalate_group` for M-05 five times, although M-05's only exception had already been handed off. `escalate_group` now refuses a call that would wake nothing, and the overview shows `can_escalate_group` per exception. In W2 there were no no-op escalations. Its one refused call (M-01's exceptions already had reply wakes) is in its summary.
+- The agent recorded the same leave reply twice in W0. `record_manager_leave` now ignores a repeat for the same reply.
+
+Runs U1 to W used the Outreach prompt from before the merged-reply fix; W2 uses the final prompt. The Supervisor-against-router A/B (next) reruns every scenario on the final code.

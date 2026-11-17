@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from tests.test_outreach_agent import Escalator
 from timesheet_exception_agent.agents.estimator import (
     ACTOR,
     CONFIDENCE_HISTORY,
@@ -30,7 +31,6 @@ from timesheet_exception_agent.sim.personas import ReplySimulator, load_personas
 from timesheet_exception_agent.sim.seed import seed
 from timesheet_exception_agent.tools.outreach import OutreachTools
 from timesheet_exception_agent.tools.retrieval import HISTORY_RULE
-from tests.test_outreach_agent import Escalator
 
 # Exception ids follow the seed's EXCEPTIONS order.
 E01, E02, E03, E08, E04, E07, E05, E06 = range(1, 9)

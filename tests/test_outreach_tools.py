@@ -209,7 +209,7 @@ def test_no_messages_after_resolved(tools):
 # LangChain wrappers
 
 
-def test_as_tools_exposes_seven_tools_and_returns_errors(tools):
+def test_as_tools_exposes_eight_tools_and_returns_errors(tools):
     by_name = {t.name: t for t in tools.as_tools()}
     assert set(by_name) == {
         "get_time",
@@ -218,6 +218,7 @@ def test_as_tools_exposes_seven_tools_and_returns_errors(tools):
         "get_next_level_manager",
         "check_replies",
         "send_message",
+        "record_manager_leave",
         "update_status",
     }
     assert set(by_name["send_message"].args) == {

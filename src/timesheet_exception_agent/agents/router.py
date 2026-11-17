@@ -33,7 +33,7 @@ class Router:
         self.conn = conn
         self.clock = clock
         self.intake = intake
-        self._out_woken: set[int] = set()
+        self.out_woken: set[int] = set()
         self.risk: dict[int, float] = {}
 
     def managers_out(self) -> set[str]:
@@ -59,12 +59,12 @@ class Router:
             " WHERE x.status = 'contacted' ORDER BY x.id"
         ).fetchall()
         for exception_id, manager_id in rows:
-            if manager_id not in out or exception_id in self._out_woken:
+            if manager_id not in out or exception_id in self.out_woken:
                 continue
             current = by_id.get(exception_id)
             if current is not None and current.reason not in REPLACEABLE:
                 continue  # a new reply or the cut-off wake already covers it
-            self._out_woken.add(exception_id)
+            self.out_woken.add(exception_id)
             by_id[exception_id] = Wake(exception_id, "manager_out")
             self._audit(
                 "route_manager_out",
@@ -82,7 +82,7 @@ class Router:
         """Proposals waiting for the coordinator, lowest confidence first."""
         rows = self.conn.execute(
             "SELECT s.exception_id, x.employee_id, e.name, s.path, s.hours, s.pay_code,"
-            "  s.confidence, s.reason FROM estimates s"
+            "  s.confidence, s.reason, s.flag FROM estimates s"
             " JOIN exceptions x ON x.id = s.exception_id"
             " JOIN employees e ON e.id = x.employee_id"
             " WHERE s.status = 'proposed' AND x.status = 'needs_fallback'"
@@ -98,8 +98,10 @@ class Router:
                 "pay_code": code,
                 "confidence": float(confidence),
                 "reason": reason,
+                "flag": flag,
             }
-            for exception_id, employee_id, name, path, hours, code, confidence, reason in rows
+            for exception_id, employee_id, name, path, hours, code, confidence, reason, flag
+            in rows
         ]
 
     def _audit(self, action, exception_id, reason, details) -> None:

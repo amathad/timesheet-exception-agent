@@ -2,9 +2,11 @@
 checkpointer."""
 
 import pytest
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+from tests.test_outreach_agent import ScriptedModel
 from timesheet_exception_agent.agents.approval import (
     ApprovalError,
     ApprovalGate,
@@ -12,15 +14,21 @@ from timesheet_exception_agent.agents.approval import (
 )
 from timesheet_exception_agent.agents.baseline import FixedReminderBaseline
 from timesheet_exception_agent.agents.estimator import Estimator
+from timesheet_exception_agent.agents.supervisor import Supervisor
 from timesheet_exception_agent.db.connection import get_conn
-from timesheet_exception_agent.graph import RECURSION_LIMIT, build_graph, make_runtime
+from timesheet_exception_agent.graph import (
+    build_graph,
+    final_report,
+    make_runtime,
+    run_config,
+)
 from timesheet_exception_agent.sim.clock import LOCK, SimClock
 from timesheet_exception_agent.sim.personas import ReplySimulator, load_personas
 from timesheet_exception_agent.sim.seed import add_duplicate, seed
-from timesheet_exception_agent.tools.outreach import OutreachTools
+from timesheet_exception_agent.tools.outreach import OutreachTools, ToolError
 
 E01, E02, E03, E08, E04, E07, E05, E06 = range(1, 9)
-CONFIG = {"configurable": {"thread_id": "t1"}, "recursion_limit": RECURSION_LIMIT}
+CONFIG = run_config("t1")
 
 
 @pytest.fixture
@@ -32,15 +40,16 @@ def conn():
         c.rollback()
 
 
-def make(conn, overrides=None, duplicate=False):
+def make(conn, overrides=None, duplicate=False, make_act=FixedReminderBaseline,
+         supervisor_factory=None):
     if duplicate:
         add_duplicate(conn)
         conn.commit()
     clock = SimClock()
-    tools = OutreachTools(conn, clock, ReplySimulator(load_personas(conn), overrides))
+    sim = ReplySimulator(load_personas(conn), overrides)
     rt = make_runtime(
-        conn, clock, tools, FixedReminderBaseline(tools), Estimator(conn, clock),
-        {"outreach": "fixed_reminder_baseline"},
+        conn, get_conn, clock, sim, make_act, Estimator(conn, clock),
+        supervisor_factory, {"outreach": "fixed_reminder_baseline"},
     )
     return rt, build_graph(rt, checkpointer=InMemorySaver())
 
@@ -171,3 +180,72 @@ def test_gate_refuses_a_second_decision(gate_setup):
     gate_setup.apply(Decision(E04, "approve", "TC"))
     with pytest.raises(ApprovalError, match="not waiting"):
         gate_setup.apply(Decision(E04, "reject", "TC"))
+
+
+# Parallel fan-out
+
+
+def outcome(conn):
+    return (
+        statuses(conn),
+        conn.execute(
+            "SELECT exception_id, person_id, count(*) FROM messages WHERE direction = 'sent'"
+            " GROUP BY 1, 2 ORDER BY 1, 2"
+        ).fetchall(),
+    )
+
+
+def test_parallel_and_sequential_runs_give_the_same_outcome(conn):
+    _, graph = make(conn)
+    graph.invoke({}, run_config("par", parallel=4))
+    parallel = outcome(conn)
+    seed(conn)
+    conn.commit()
+    _, graph = make(conn)
+    graph.invoke({}, run_config("seq", parallel=1))
+    assert outcome(conn) == parallel
+
+
+def test_each_task_has_its_own_connection_and_scope(conn):
+    seen = []
+
+    class Probe(FixedReminderBaseline):
+        def __call__(self, wake):
+            seen.append((id(self.tools.conn), self.tools.scope, wake.exception_id))
+            other = E02 if wake.exception_id != E02 else E01
+            with pytest.raises(ToolError, match="working on exception"):
+                self.tools.update_status(other, "needs_fallback", "steered by a reply")
+            return super().__call__(wake)
+
+    rt, graph = make(conn, make_act=Probe)
+    graph.invoke({}, CONFIG)
+    assert seen and all(scope == x for _, scope, x in seen)
+    assert id(rt.conn) not in {c for c, _, _ in seen}
+
+
+def test_router_merges_drafts_to_the_same_manager(conn):
+    _, graph = make(conn)
+    state = graph.invoke({}, CONFIG)
+    merged = [d for d in state["deliveries"] if d["merged_by"]]
+    first = {(d["person_id"], tuple(d["exceptions"])) for d in merged if d["time"] == "08:00"}
+    # The baseline emails every manager at 08:00: M-01, M-02 and M-03 have two each.
+    assert first == {("M-01", (E01, E02)), ("M-02", (E03, E08)), ("M-03", (E04, E07))}
+    report = final_report(conn)  # the graph is paused for approval
+    assert report["deliveries"] < report["messages_sent"]
+
+
+def test_supervisor_that_changes_nothing_leaves_the_router_outcome(conn):
+    _, graph = make(conn)
+    graph.invoke({}, run_config("router"))
+    router_outcome = outcome(conn)
+    seed(conn)
+    conn.commit()
+
+    def quiet(conn, clock, router, outbox):
+        replies = (AIMessage("Nothing to change.") for _ in range(1000))
+        return Supervisor(conn, clock, router, outbox, model=ScriptedModel(messages=replies))
+
+    _, graph = make(conn, supervisor_factory=quiet)
+    graph.invoke({}, run_config("sup"))  # pauses for approval
+    assert outcome(conn) == router_outcome
+    assert final_report(conn)["supervisor_calls"] > 0

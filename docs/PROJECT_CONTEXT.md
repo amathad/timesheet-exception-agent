@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-16:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 in progress: the minimal code-only Estimator is merged and tested live. Module 5 in progress: `graph.py` (LangGraph lock-day workflow with a coordinator approval pause), code-only Intake, the rule-based router and the fixed-reminder baseline are built and tested live. Next: the LLM Supervisor and its A/B against the router.
+**Status as of 2026-11-17:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 in progress: the minimal code-only Estimator is merged and tested live. Module 5 in progress: `graph.py` (LangGraph lock-day workflow with parallel Outreach and a coordinator approval pause), code-only Intake, the rule-based router, the fixed-reminder baseline, merged delivery and the LLM Supervisor are built and tested live. Next: the Supervisor A/B against the router.
 
 ---
 
@@ -106,7 +106,7 @@ Retrieval tables (12 in total): `policy_chunks` and `case_memory`, each with a `
 
 Estimator table (13 in total): `estimates`, one fallback proposal per exception (path, method, hours, pay code, confidence, reason, basis, status `proposed`/`withdrawn`/`approved`/`edited`/`rejected`). `approved_by` and `approved_at` stay empty until the coordinator's approval gate (`agents/approval.py`), which also writes `final_hours` and `final_pay_code`, so a proposal's error can be measured. The seed clears it.
 
-Triage table (14 in total): `triage`, one row per exception (manager, lock risk 0–1 with its `factors`, `duplicate_of`), written by Intake and rescored by the router each tick. Exceptions have a new status, `duplicate`. `PostgresSaver.setup()` adds four LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`), for 18 in the database.
+Triage table (14 in total): `triage`, one row per exception (manager, lock risk 0–1 with its `factors`, `duplicate_of`), written by Intake and rescored by the router each tick. Exceptions have a new status, `duplicate`. Outbox table (15 in total): `outbox`, Outreach drafts queued during a tick in graph runs, delivered (and merged) at its end; `messages.batch_id` links the per-exception rows of one merged message; `estimates.flag` holds a Supervisor concern. `PostgresSaver.setup()` adds four LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`), for 19 in the database.
 
 ## 4. Build status
 
@@ -128,6 +128,10 @@ Triage table (14 in total): `triage`, one row per exception (manager, lock risk 
 - [x] Module 5 rule-based router (`agents/router.py`, code only; the Supervisor's fallback and A/B baseline): rescores risk each tick, wakes a manager's other contacted exceptions with `manager_out` once the manager is known to be out (presence or an auto-reply), orders wakes by risk, and builds the approval queue (lowest confidence first); `OutreachDriver(..., plan=...)`; `tests/test_router.py`
 - [x] Fixed-reminder baseline (`agents/baseline.py`): emails the manager, fixed reminders up to the cap, never escalates, resolves on the keyword "approv"; `tests/test_baseline.py`
 - [x] `graph.py`: LangGraph workflow (intake → tick/advance loop → lock → approval `interrupt` → report), `PostgresSaver` checkpoints, coordinator approval gate (`agents/approval.py`: approve/edit/reject with initials and time, audited as `coordinator`); `--baseline`, `--duplicate`, `--decisions`; `tests/test_graph.py`. Estimator now records teammates already contacted (run Q finding). Live runs R–T in `docs/LIVE_RUNS.md`. Full suite 205 passing
+- [x] Parallel Outreach (`graph.py`): wakes fanned out with LangGraph `Send` (`max_concurrency` 4, `--sequential` for 1), each task with its own connection, `OutreachTools` and scope; thread-safe reply simulator
+- [x] Merged delivery (`tools/outbox.py`): `send_message` queues drafts in graph runs; at the end of the tick, drafts to the same person and channel are merged (router template, or the Supervisor's body) after code checks (every employee in the group named, no one else, no citations, length), else sent separately; one reply to a merged message is filed on each exception, and `check_replies` marks it
+- [x] Leave replies: Outreach tool `record_manager_leave` (tied to the manager's reply, audited) and email auto-replies now allow escalation before 9:00 AM, per rule 2; new reply kind `on_leave_teams`
+- [x] LLM Supervisor (`agents/supervisor.py`): coordinates across exceptions over code orchestration, called on events (review), for merges and at the lock (queue); tools `get_overview`, `escalate_group`, `wake_now`, `flag_estimate`, `merge_messages`, `write_queue`, each refusing illegal moves in code; the router's plan stands if a call fails; calls and tokens audited. `tests/test_outbox.py`, `tests/test_supervisor.py`; live runs U1–W2. Full suite 244 passing
 
 ## 5. Evaluation plan
 
@@ -259,3 +263,34 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Merged as PR #9 (squash, `95402e0`) into `master`.
 - **Next:** LLM Supervisor with message merging (show the scoping design before coding it), then its A/B against the router.
 - **Behind schedule:** on plan for the 2026-11-16 slot (graph, Intake, router, baseline). Still to build: the LLM Supervisor, the A/B, gated ToT, the MCP server, then the evaluation tables, report and video.
+
+### 2026-11-17 (Module 5)
+- Design agreed with the user before building:
+  - **The Supervisor's role:** the graph (code) is the orchestrator. The Supervisor is an LLM agent that coordinates across exceptions over the router's plan, not an LLM that picks the next agent. That keeps business rules in code and isolates what the LLM adds for the A/B. The name is kept, and the report will explain the role.
+  - **Merging:** messages are merged at delivery, through an outbox, so each Outreach wake stays scoped to one exception.
+  - **Estimates:** `flag_estimate` now, becoming a send-back once gated ToT exists.
+  - **Model:** Haiku 5.5 for the Supervisor.
+  - **Parallel:** Outreach fan-out added to this build.
+  - **New cut order:** ToT, MCP server, parallel fan-out, message merging.
+- Work on branch `module5-supervisor-parallel`.
+- Added `tools/outbox.py` (outbox, merge checks, router template merge, delivery with `batch_id`). Schema: `outbox` table (15 tables), `messages.batch_id`, `estimates.flag`. `ReplySimulator` answers a merged message once and files the reply on each exception, has a lock for parallel wakes, and has a new `on_leave_teams` kind.
+- Found while planning: a manager who replies "I'm on leave" while Teams shows available could not be escalated before 9:00, against rule 2. Added the Outreach tool `record_manager_leave`, tied to that reply and audited. Email auto-replies also allow early escalation now. The router still uses only deterministic signals.
+- `graph.py`: the tick is plan → Outreach fan-out (`Send`, own connection, tools and scope per task) → deliver (merge, deliver, Estimator). Flags `--supervisor`, `--sequential`, `--parallel N`. The report now includes deliveries, model time, Supervisor calls and tokens.
+- Added `agents/supervisor.py`: review, merge and queue calls, six tools with code refusals, the router's plan standing on failure, and calls audited with token use.
+- Live runs U1 to W2 on Haiku (`docs/LIVE_RUNS.md`):
+  - Parallel had the same outcomes as sequential, 2.4 times faster (36 s against 87 s).
+  - Merging cut deliveries from 10 to 6.
+  - The leave fix worked.
+  - The Supervisor changed no outcome on the default morning, at 8–9 calls and about 50–65k input tokens per run.
+- Fixed after run W:
+  - an agent called a reply to a merged message "ambiguous" and missed the lock, so `check_replies` now marks such replies and the prompt covers them;
+  - no-op `escalate_group` calls are refused;
+  - a repeated leave record is ignored.
+- New tests: `test_outbox.py`, `test_supervisor.py`, plus parallel, merge and Supervisor tests in `test_graph.py`. Full suite 244 passing.
+- Open:
+  - Supervisor calls run between the parallel steps and roughly double wall time.
+  - Its group escalation adds nothing once messages are merged, since the merged reply reaches every exception. It would matter when a manager's exceptions are contacted at different times; covered by tests only.
+  - The Outreach prompt changed (leave recording, merged replies), so earlier runs are not exactly comparable.
+- Not merged yet; no PR opened.
+- **Next:** the Supervisor A/B against the router on the same scenarios (default, `N-02=silent`, stalling, injection, `use_history`, duplicate, `on_leave_teams`), measuring decisions before the lock, wrong resolutions, messages, coordinator interventions, model calls, tokens and latency. Then gated ToT and the MCP server.
+- **Behind schedule:** on plan for the 2026-11-17 slot. Still to build: the A/B, gated ToT, the MCP server, then the evaluation tables, report and video.
