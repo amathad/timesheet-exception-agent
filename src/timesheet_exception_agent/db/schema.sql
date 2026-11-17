@@ -66,6 +66,25 @@ CREATE TABLE IF NOT EXISTS messages (
   sim_time      TIMESTAMPTZ NOT NULL
 );
 
+-- Merged delivery (Module 5): one message covering several exceptions is stored as one row
+-- per exception sharing a batch_id, so each exception's history and the per-person cap stay
+-- per exception.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS batch_id INT;
+
+-- Outbox (Module 5): in graph runs, send_message queues a draft here; at the end of the tick
+-- drafts to the same person and channel may be merged, then delivered into messages.
+CREATE TABLE IF NOT EXISTS outbox (
+  id            SERIAL PRIMARY KEY,
+  exception_id  INT  NOT NULL REFERENCES exceptions(id),
+  person_id     TEXT NOT NULL REFERENCES employees(id),
+  role          TEXT NOT NULL,
+  channel       TEXT NOT NULL CHECK (channel IN ('email','teams')),
+  body          TEXT NOT NULL,
+  drafted_at    TIMESTAMPTZ NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','delivered')),
+  batch_id      INT
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id            BIGSERIAL PRIMARY KEY,
   sim_time      TIMESTAMPTZ NOT NULL,
@@ -111,6 +130,8 @@ CREATE TABLE IF NOT EXISTS estimates (
 ALTER TABLE estimates ADD COLUMN IF NOT EXISTS final_hours NUMERIC(5,2)
   CHECK (final_hours >= 0);
 ALTER TABLE estimates ADD COLUMN IF NOT EXISTS final_pay_code TEXT;
+-- Supervisor (Module 5): a concern about a proposal for the coordinator, at most one.
+ALTER TABLE estimates ADD COLUMN IF NOT EXISTS flag TEXT;
 
 -- Intake / triage (Module 5, code only): one row per exception on the period being worked.
 -- risk is the lock-risk forecast (chance the exception reaches the lock with no manager

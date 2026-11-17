@@ -9,6 +9,7 @@ holding note and never approves.
 Out-of-office auto-replies only go out on email. On Teams, leave shows up in presence instead.
 """
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -66,9 +67,21 @@ REPLIES: dict[str, tuple[int, str | tuple[str, ...]] | None] = {
             " what {employee} usually works."
         ),
     ),
+    # A manager on leave who answers one Teams message in person (not an auto-reply, and
+    # presence still shows available) and ignores the rest. Tests applying one exception's
+    # facts to the manager's other exceptions (Module 5 Supervisor).
+    "on_leave_teams": (
+        10,
+        (
+            "I'm on leave today and tomorrow, so I can't look at timesheets. Please contact"
+            " my manager for anything urgent."
+        ),
+    ),
 }
 
 AUTO_REPLY_KINDS = {"on_leave", "no_next_level"}
+# Kinds that answer only the first message they get, whichever exception it is about.
+ONCE_PER_PERSON = {"on_leave_teams"}
 
 
 @dataclass(frozen=True)
@@ -91,7 +104,10 @@ class ReplySimulator:
         if unknown:
             raise ValueError(f"unknown reply kinds: {sorted(unknown)}")
         self._answered: dict[tuple[int, str], int] = {}  # replies sent so far
+        self._people_answered: set[str] = set()
         self._pending: list[Reply] = []
+        # Parallel Outreach wakes may call due() (through check_replies) at the same time.
+        self._lock = threading.Lock()
 
     def on_sent(
         self,
@@ -102,36 +118,61 @@ class ReplySimulator:
         sent_at: datetime,
     ) -> Reply | None:
         """Record an outgoing message; return the reply it will trigger, if any."""
-        key = (exception_id, person_id)
-        # People without a persona (for example teammates) never reply.
-        kind = self._kinds.get(person_id, "silent")
-        behavior = REPLIES[kind]
-        if behavior is None or (kind in AUTO_REPLY_KINDS and channel != "email"):
-            return None
-        delay, template = behavior
-        count = self._answered.get(key, 0)
-        if isinstance(template, tuple):
-            template = template[count % len(template)]
-        elif count:
-            return None
-        reply = Reply(
-            exception_id=exception_id,
-            person_id=person_id,
-            channel=channel,
-            body=template.format(employee=employee),
-            sim_time=sent_at + timedelta(minutes=delay),
-        )
-        self._answered[key] = count + 1
-        self._pending.append(reply)
-        return reply
+        replies = self.on_sent_batch([(exception_id, employee)], person_id, channel, sent_at)
+        return replies[0] if replies else None
+
+    def on_sent_batch(
+        self,
+        items: list[tuple[int, str]],
+        person_id: str,
+        channel: str,
+        sent_at: datetime,
+    ) -> list[Reply]:
+        """Record one message about several exceptions ([(exception_id, employee), ...]).
+
+        The person answers it once, as they would a single message: the same reply, naming
+        every employee, is filed on each exception. Returns the replies scheduled.
+        """
+        with self._lock:
+            first = items[0][0]
+            # People without a persona (for example teammates) never reply.
+            kind = self._kinds.get(person_id, "silent")
+            behavior = REPLIES[kind]
+            if behavior is None or (kind in AUTO_REPLY_KINDS and channel != "email"):
+                return []
+            if kind in ONCE_PER_PERSON and person_id in self._people_answered:
+                return []
+            delay, template = behavior
+            count = self._answered.get((first, person_id), 0)
+            if isinstance(template, tuple):
+                template = template[count % len(template)]
+            elif count:
+                return []
+            names = [employee for _, employee in items]
+            employee = names[0] if len(names) == 1 else (
+                ", ".join(names[:-1]) + " and " + names[-1]
+            )
+            body = template.format(employee=employee)
+            when = sent_at + timedelta(minutes=delay)
+            replies = [
+                Reply(exception_id=x, person_id=person_id, channel=channel, body=body,
+                      sim_time=when)
+                for x, _ in items
+            ]
+            for x, _ in items:
+                self._answered[(x, person_id)] = self._answered.get((x, person_id), 0) + 1
+            self._people_answered.add(person_id)
+            self._pending.extend(replies)
+            return replies
 
     def due(self, now: datetime) -> list[Reply]:
         """Remove and return replies whose time has come, oldest first."""
-        ready = sorted(
-            (r for r in self._pending if r.sim_time <= now), key=lambda r: r.sim_time
-        )
-        self._pending = [r for r in self._pending if r.sim_time > now]
-        return ready
+        with self._lock:
+            ready = sorted(
+                (r for r in self._pending if r.sim_time <= now), key=lambda r: r.sim_time
+            )
+            self._pending = [r for r in self._pending if r.sim_time > now]
+            return ready
 
     def pending(self) -> int:
         return len(self._pending)

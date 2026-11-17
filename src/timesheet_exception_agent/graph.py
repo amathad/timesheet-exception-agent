@@ -1,38 +1,48 @@
 """Lock-day workflow as a LangGraph state machine (Module 5).
 
-    start ─► intake ─► tick ─► advance ─┬─► tick            (before 10:00 AM)
-                                        └─► lock ─┬─► approve ─► report   (proposals waiting)
-                                                  └─► report             (nothing to approve)
+                       ┌──► outreach ──┐  (one task per wake, in parallel)
+    intake ─► plan ────┤               ├──► deliver ─► advance ─┬─► plan   (before 10:00)
+                       └───────────────┘  (no wakes)            └─► lock ─┬─► approve ─► report
+                                                                          └─► report
 
+The graph (code) is the orchestrator: it owns the clock, timers, deadlines, hand-offs and
+when each agent runs.
 - intake: Intake loads, dedupes, groups and scores the exceptions (code only).
-- tick: the OutreachDriver delivers replies and applies its timers; the rule-based router
-  rescores risk, adds manager_out wakes and orders the wakes by risk; then Outreach (the
-  ReAct agent, or the fixed-reminder baseline) works each wake, and the Estimator proposes
-  for any hand-off. Wakes in one tick run one after another, in router order: the tools
-  share one database connection, the scope guard and the reply simulator.
+- plan: the OutreachDriver delivers replies and applies its timers; the rule-based router
+  rescores risk, adds manager_out wakes and orders the wakes; on events, the LLM Supervisor
+  may adjust the plan through its tools (the router's plan stands if it fails).
+- outreach: one task per wake, fanned out with Send and run in parallel (max_concurrency,
+  default 4; --sequential sets 1). Each task gets its own database connection,
+  OutreachTools and scope, so a reply can still only steer its own exception. send_message
+  queues a draft in the outbox.
+- deliver: drafts to the same person and channel are merged (the Supervisor's body if it
+  wrote one that passes the checks, else the router's template), then delivered; the
+  Estimator proposes for any hand-off.
 - advance: the shared simulated clock moves 10 minutes.
 - lock: the deadline rule hands anything still waiting to the coordinator; the router
-  builds the approval queue.
+  builds the approval queue and the Supervisor may order and annotate it.
 - approve: the graph pauses (interrupt) with the queue. The coordinator resumes it with
   decisions, which the approval gate validates and applies in code.
 - report: final statuses, read from the database.
 
-Typed state is checkpointed after every step (PostgreSQL in live runs, memory in tests), so
-the approval pause can be resumed later. The clock, reply simulator and database connection
-are runtime objects, not state, so a run can only be resumed in the process that started
-it: enough for the approval pause, not for restarting a morning halfway.
+Typed state is checkpointed after every step (PostgreSQL in live runs, memory in tests). The
+clock, reply simulator and connections are runtime objects, not state, so a run can only be
+resumed in the process that started it: enough for the approval pause.
 
 Run a live lock morning (reseeds the database; needs ANTHROPIC_API_KEY unless --baseline):
-    uv run python -m timesheet_exception_agent.graph [--baseline] [--duplicate]
-        [--override PERSON=KIND] [--no-retrieval] [--decisions FILE]
+    uv run python -m timesheet_exception_agent.graph [--baseline] [--supervisor]
+        [--sequential | --parallel N] [--duplicate] [--override PERSON=KIND]
+        [--no-retrieval] [--decisions FILE]
 """
 
 import operator
-from dataclasses import dataclass
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Send, interrupt
 
 from timesheet_exception_agent.agents.approval import (
     INITIALS,
@@ -41,20 +51,30 @@ from timesheet_exception_agent.agents.approval import (
     parse_decision,
 )
 from timesheet_exception_agent.agents.intake import Intake
-from timesheet_exception_agent.agents.outreach import OutreachDriver
+from timesheet_exception_agent.agents.outreach import OutreachDriver, Wake
 from timesheet_exception_agent.agents.router import Router
 from timesheet_exception_agent.sim.clock import LOCK, SimClock
+from timesheet_exception_agent.sim.personas import ReplySimulator
+from timesheet_exception_agent.tools.outbox import Outbox
 from timesheet_exception_agent.tools.outreach import DRIVER, OutreachTools
 
-# Steps per run: 12 ticks x 2 nodes, plus intake, lock, approve and report.
+# Supersteps per run: 12 ticks x 4 (plan, outreach, deliver, advance), plus the rest.
 RECURSION_LIMIT = 100
+DEFAULT_PARALLEL = 4
+
+
+class WakeTask(TypedDict):
+    exception_id: int
+    reason: str
 
 
 class LockDayState(TypedDict, total=False):
     now: str  # simulated time, ISO format
     ticks: int
     intake: dict
-    log: Annotated[list[dict], operator.add]  # one entry per agent turn
+    pending: list[WakeTask]  # this tick's wakes, in plan order
+    log: Annotated[list[dict], operator.add]  # one entry per Outreach turn
+    deliveries: Annotated[list[dict], operator.add]
     handed_off_at_lock: list[int]
     queue: list[dict]
     decisions: list[dict]
@@ -65,37 +85,63 @@ class LockDayState(TypedDict, total=False):
 class Runtime:
     """Objects the nodes use that are not part of the checkpointed state."""
 
-    conn: Any
+    conn: Any  # the main connection (plan, deliver, lock, approve)
+    connect: Callable[[], Any]  # a new connection for one Outreach task
     clock: SimClock
-    tools: OutreachTools
+    sim: ReplySimulator
+    make_act: Callable[[OutreachTools], Callable[[Wake], str]]
     driver: OutreachDriver
     intake: Intake
     router: Router
+    outbox: Outbox
     gate: ApprovalGate
-    details: dict
+    supervisor: Any = None
+    details: dict = field(default_factory=dict)
 
 
-def make_runtime(conn, clock, tools, act, estimator=None, details=None) -> Runtime:
+def make_runtime(
+    conn,
+    connect,
+    clock,
+    sim,
+    make_act,
+    estimator=None,
+    supervisor_factory=None,
+    details=None,
+) -> Runtime:
+    """Wire the runtime. `make_act(tools)` builds the Outreach turn for one task's tools;
+    `supervisor_factory(conn, clock, router, outbox)` builds the Supervisor, if any."""
+    tools = OutreachTools(conn, clock, sim, outbox=True)
     intake = Intake(conn, clock)
     router = Router(conn, clock, intake)
-    driver = OutreachDriver(
-        conn, clock, tools, act, estimator=estimator, plan=router.plan
+    outbox = Outbox(conn, clock, sim)
+
+    def no_act(wake: Wake) -> str:  # the graph runs Outreach in its own node
+        raise RuntimeError("the graph does not use the driver's act")
+
+    driver = OutreachDriver(conn, clock, tools, no_act, estimator=estimator)
+    supervisor = (
+        supervisor_factory(conn, clock, router, outbox) if supervisor_factory else None
     )
     return Runtime(
         conn=conn,
+        connect=connect,
         clock=clock,
-        tools=tools,
+        sim=sim,
+        make_act=make_act,
         driver=driver,
         intake=intake,
         router=router,
+        outbox=outbox,
         gate=ApprovalGate(conn, clock),
+        supervisor=supervisor,
         details=details or {},
     )
 
 
 def build_graph(rt: Runtime, checkpointer=None):
     def intake(state: LockDayState) -> dict:
-        rt.tools.audit(
+        rt.driver.tools.audit(
             "run_started",
             None,
             f"lock-day graph run until {LOCK:%H:%M %Z}",
@@ -115,32 +161,75 @@ def build_graph(rt: Runtime, checkpointer=None):
             },
         }
 
-    def tick(state: LockDayState) -> dict:
-        now = rt.clock.now()
-        done = rt.driver.tick()
+    def plan(state: LockDayState) -> dict:
+        wakes = rt.router.plan(rt.driver.due())
+        if rt.supervisor is not None:
+            wakes = rt.supervisor.review(wakes)
+        rt.conn.commit()  # Outreach tasks use their own connections
         return {
-            "ticks": state.get("ticks", 0) + 1,
+            "pending": [{"exception_id": w.exception_id, "reason": w.reason} for w in wakes]
+        }
+
+    def fan_out(state: LockDayState):
+        tasks = state.get("pending") or []
+        return [Send("outreach", t) for t in tasks] if tasks else "deliver"
+
+    def outreach(task: WakeTask) -> dict:
+        wake = Wake(task["exception_id"], task["reason"])
+        now = rt.clock.now()
+        started = time.perf_counter()
+        with rt.connect() as conn:
+            tools = OutreachTools(conn, rt.clock, rt.sim, outbox=True)
+            act = rt.make_act(tools)
+            with tools.scoped(wake.exception_id):
+                summary = act(wake)
+            seconds = round(time.perf_counter() - started, 2)
+            tools.audit(
+                "agent_turn",
+                wake.exception_id,
+                summary,
+                {"wake": wake.reason, "seconds": seconds},
+                actor=DRIVER,
+            )
+            conn.commit()
+        return {
             "log": [
                 {
                     "time": f"{now:%H:%M}",
                     "exception_id": wake.exception_id,
                     "wake": wake.reason,
                     "summary": summary,
+                    "seconds": seconds,
                 }
-                for wake, summary in done
-            ],
+            ]
+        }
+
+    def deliver(state: LockDayState) -> dict:
+        merged = {}
+        if rt.supervisor is not None:
+            merged = rt.supervisor.merge(rt.outbox.groups())
+        sent = rt.outbox.deliver(merged)
+        if rt.driver.estimator is not None:
+            rt.driver.estimator.sync()
+        rt.conn.commit()
+        now = f"{rt.clock.now():%H:%M}"
+        return {
+            "ticks": state.get("ticks", 0) + 1,
+            "deliveries": [{**d, "time": now} for d in sent],
         }
 
     def advance(state: LockDayState) -> dict:
         return {"now": rt.clock.advance().isoformat()}
 
     def after_advance(state: LockDayState) -> str:
-        return "lock" if rt.clock.is_past(LOCK) else "tick"
+        return "lock" if rt.clock.is_past(LOCK) else "plan"
 
     def lock(state: LockDayState) -> dict:
         handed = rt.driver.lock()
         rt.intake.score()
         queue = rt.router.approval_queue()
+        if rt.supervisor is not None:
+            queue = rt.supervisor.order_queue(queue)
         rt.conn.commit()
         return {"handed_off_at_lock": handed, "queue": queue}
 
@@ -166,7 +255,9 @@ def build_graph(rt: Runtime, checkpointer=None):
     g = StateGraph(LockDayState)
     for name, fn in [
         ("intake", intake),
-        ("tick", tick),
+        ("plan", plan),
+        ("outreach", outreach),
+        ("deliver", deliver),
         ("advance", advance),
         ("lock", lock),
         ("approve", approve),
@@ -174,13 +265,23 @@ def build_graph(rt: Runtime, checkpointer=None):
     ]:
         g.add_node(name, fn)
     g.add_edge(START, "intake")
-    g.add_edge("intake", "tick")
-    g.add_edge("tick", "advance")
-    g.add_conditional_edges("advance", after_advance, ["tick", "lock"])
+    g.add_edge("intake", "plan")
+    g.add_conditional_edges("plan", fan_out, ["outreach", "deliver"])
+    g.add_edge("outreach", "deliver")
+    g.add_edge("deliver", "advance")
+    g.add_conditional_edges("advance", after_advance, ["plan", "lock"])
     g.add_conditional_edges("lock", after_lock, ["approve", "report"])
     g.add_edge("approve", "report")
     g.add_edge("report", END)
     return g.compile(checkpointer=checkpointer)
+
+
+def run_config(thread_id: str, parallel: int = DEFAULT_PARALLEL) -> dict:
+    return {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": RECURSION_LIMIT,
+        "max_concurrency": parallel,
+    }
 
 
 def final_report(conn) -> dict:
@@ -197,12 +298,19 @@ def final_report(conn) -> dict:
             " LEFT JOIN triage t ON t.exception_id = x.id ORDER BY x.id"
         )
     ]
-    sent = conn.execute(
-        "SELECT count(*) FROM messages WHERE direction = 'sent'"
-    ).fetchone()[0]
-    turns = conn.execute(
-        "SELECT count(*) FROM audit_log WHERE action = 'agent_turn'"
-    ).fetchone()[0]
+    sent, batches = conn.execute(
+        "SELECT count(*), count(DISTINCT coalesce(batch_id::text, 'm' || id))"
+        " FROM messages WHERE direction = 'sent'"
+    ).fetchone()
+    turns, turn_seconds = conn.execute(
+        "SELECT count(*), coalesce(sum((details->>'seconds')::numeric), 0)"
+        " FROM audit_log WHERE action = 'agent_turn'"
+    ).fetchone()
+    calls, tokens_in, tokens_out = conn.execute(
+        "SELECT count(*), coalesce(sum((details->>'input_tokens')::int), 0),"
+        " coalesce(sum((details->>'output_tokens')::int), 0)"
+        " FROM audit_log WHERE action = 'supervisor_call'"
+    ).fetchone()
     estimates = [
         {
             "exception_id": x_id,
@@ -212,16 +320,21 @@ def final_report(conn) -> dict:
             "status": status,
             "approved_by": by,
             "final_hours": float(final) if final is not None else None,
+            "flag": flag,
         }
-        for x_id, path, hours, conf, status, by, final in conn.execute(
+        for x_id, path, hours, conf, status, by, final, flag in conn.execute(
             "SELECT exception_id, path, hours, confidence, status, approved_by,"
-            " final_hours FROM estimates ORDER BY exception_id"
+            " final_hours, flag FROM estimates ORDER BY exception_id"
         )
     ]
     return {
         "exceptions": exceptions,
-        "messages_sent": sent,
+        "messages_sent": sent,  # one per exception, so a merged message counts per exception
+        "deliveries": batches,  # messages people actually received
         "agent_turns": turns,
+        "agent_turn_seconds": float(turn_seconds),
+        "supervisor_calls": calls,
+        "supervisor_tokens": {"input": tokens_in, "output": tokens_out},
         "estimates": estimates,
     }
 
@@ -234,10 +347,12 @@ def ask_decisions(queue: list[dict]) -> list[dict]:
         raise SystemExit("initials must be 2 or 3 letters")
     out = []
     for item in queue:
+        note = f"\n  Supervisor: {item['supervisor_note']}" if item.get("supervisor_note") else ""
+        flag = f"\n  Flag: {item['flag']}" if item.get("flag") else ""
         print(
             f"\n#{item['exception_id']} {item['employee']} ({item['employee_id']}):"
             f" {item['path']}, {item['hours']:g} h {item['pay_code']},"
-            f" confidence {item['confidence']}\n  {item['reason']}"
+            f" confidence {item['confidence']}\n  {item['reason']}{flag}{note}"
         )
         answer = input("  [a]pprove, [e]dit HOURS [CODE], [r]eject: ").split()
         kind = {"a": "approve", "e": "edit", "r": "reject"}.get(
@@ -268,18 +383,24 @@ if __name__ == "__main__":
     from timesheet_exception_agent.agents.outreach import (
         agent_act,
         build_agent,
+        default_model,
         model_settings,
         parse_overrides,
     )
+    from timesheet_exception_agent.agents.supervisor import Supervisor
     from timesheet_exception_agent.db.connection import get_conn
-    from timesheet_exception_agent.sim.personas import ReplySimulator, load_personas
+    from timesheet_exception_agent.sim.personas import load_personas
     from timesheet_exception_agent.sim.seed import add_duplicate, seed
 
     parser = argparse.ArgumentParser(description="Run one simulated lock morning as a graph.")
     parser.add_argument("--baseline", action="store_true", help="fixed-reminder baseline, no model")
+    parser.add_argument("--supervisor", action="store_true", help="add the LLM Supervisor")
     parser.add_argument("--duplicate", action="store_true", help="add a duplicate exception")
     parser.add_argument("--override", action="append", default=[], metavar="PERSON=KIND")
     parser.add_argument("--no-retrieval", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--sequential", action="store_true", help="one Outreach task at a time")
+    mode.add_argument("--parallel", type=int, default=DEFAULT_PARALLEL, metavar="N")
     parser.add_argument(
         "--decisions",
         metavar="FILE",
@@ -290,19 +411,31 @@ if __name__ == "__main__":
         overrides = parse_overrides(args.override)
     except ValueError as e:
         parser.error(str(e))
+    parallel = 1 if args.sequential else max(1, args.parallel)
 
     sys.stdout.reconfigure(encoding="utf-8")
     load_dotenv()
     settings = model_settings()
+    needs_model = args.supervisor or not args.baseline
+    key = os.getenv("ANTHROPIC_API_KEY", "")
+    if needs_model and settings["model"].startswith("anthropic:") and (
+        not key or key.startswith("<")
+    ):
+        raise SystemExit("Set ANTHROPIC_API_KEY in .env, or use --baseline.")
     use_retrieval = not (args.baseline or args.no_retrieval)
     details = {
         "outreach": "fixed_reminder_baseline" if args.baseline else "agent",
-        "model": None if args.baseline else settings["model"],
-        "effort": None if args.baseline else settings["effort"],
+        "supervisor": args.supervisor,
+        "model": settings["model"] if needs_model else None,
+        "effort": settings["effort"] if needs_model else None,
+        "parallel": parallel,
         "overrides": overrides,
         "duplicate": args.duplicate,
     }
-    print(f"Outreach: {details['outreach']}  model: {details['model'] or '-'}")
+    print(
+        f"Outreach: {details['outreach']}  supervisor: {'on' if args.supervisor else 'off'}"
+        f"  model: {details['model'] or '-'}  parallel: {parallel}"
+    )
     if overrides:
         print("Overrides: " + ", ".join(f"{p}={k}" for p, k in overrides.items()))
 
@@ -316,16 +449,13 @@ if __name__ == "__main__":
         conn.commit()
         clock = SimClock()
         sim = ReplySimulator(load_personas(conn), overrides=overrides)
-        tools = OutreachTools(conn, clock, sim)
+        model = default_model() if needs_model else None
+
         if args.baseline:
-            act = FixedReminderBaseline(tools)
+            def make_act(tools):
+                return FixedReminderBaseline(tools)
         else:
-            key = os.getenv("ANTHROPIC_API_KEY", "")
-            if settings["model"].startswith("anthropic:") and (
-                not key or key.startswith("<")
-            ):
-                raise SystemExit("Set ANTHROPIC_API_KEY in .env, or use --baseline.")
-            retrieval = None
+            embedder = None
             if use_retrieval:
                 from timesheet_exception_agent.retrieval.embeddings import FastEmbedder
                 from timesheet_exception_agent.retrieval.search import (
@@ -342,32 +472,54 @@ if __name__ == "__main__":
                         require_corpus(conn, corpus, embedder.name)
                 except RetrievalError as e:
                     raise SystemExit(str(e)) from e
-                retrieval = RetrievalTools(
-                    conn, clock, embedder, current_exception=lambda: tools.scope
-                )
                 details["retrieval"] = embedder.name
-            act = agent_act(build_agent(tools, retrieval=retrieval), clock, retrieval)
-        rt = make_runtime(conn, clock, tools, act, Estimator(conn, clock), details)
+
+            def make_act(tools):
+                retrieval = None
+                if embedder is not None:
+                    retrieval = RetrievalTools(
+                        tools.conn, clock, embedder, current_exception=lambda: tools.scope
+                    )
+                agent = build_agent(tools, model=model, retrieval=retrieval)
+                return agent_act(agent, clock, retrieval)
+
+        supervisor_factory = None
+        if args.supervisor:
+            def supervisor_factory(conn, clock, router, outbox):
+                return Supervisor(conn, clock, router, outbox, model=model)
+
+        rt = make_runtime(
+            conn, get_conn, clock, sim, make_act, Estimator(conn, clock),
+            supervisor_factory, details,
+        )
         graph = build_graph(rt, checkpointer=saver)
-        thread = {
-            "configurable": {"thread_id": f"lockday-{uuid.uuid4().hex[:8]}"},
-            "recursion_limit": RECURSION_LIMIT,
-        }
+        thread = run_config(f"lockday-{uuid.uuid4().hex[:8]}", parallel)
         print(f"Thread: {thread['configurable']['thread_id']}\n")
+        started = time.perf_counter()
 
         def show(chunk):
             for node, update in chunk.items():
+                if not update:
+                    continue
                 if node == "intake":
                     i = update["intake"]
                     print(
                         f"Intake: {i['loaded']} loaded, duplicates {i['duplicates'] or 'none'},"
                         f" {i['managers']} managers, risk {i['risk']}"
                     )
-                elif node == "tick":
+                elif node == "outreach":
                     for e in update["log"]:
                         print(
-                            f"{e['time']}  #{e['exception_id']:<2} {e['wake']:<14} {e['summary']}"
+                            f"{e['time']}  #{e['exception_id']:<2} {e['wake']:<14}"
+                            f" ({e['seconds']:.0f}s) {e['summary']}"
                         )
+                elif node == "deliver":
+                    for d in update.get("deliveries", []):
+                        if d["merged_by"]:
+                            print(
+                                f"{d['time']}  merged by {d['merged_by']}: one {d['channel']}"
+                                f" to {d['person_id']} for {d['exceptions']}"
+                            )
                 elif node == "lock":
                     print(f"\nAt lock, handed to coordinator: {update['handed_off_at_lock'] or 'none'}")
 
@@ -375,10 +527,11 @@ if __name__ == "__main__":
             if "__interrupt__" in chunk:
                 break
             show(chunk)
+        morning_seconds = time.perf_counter() - started
         state = graph.get_state(thread)
         if state.next == ("approve",):
             queue = state.values["queue"]
-            print(f"\nApproval queue ({len(queue)} proposals, lowest confidence first):")
+            print(f"\nApproval queue ({len(queue)} proposals):")
             if args.decisions:
                 with open(args.decisions, encoding="utf-8") as f:
                     answers = json.load(f)
@@ -393,10 +546,19 @@ if __name__ == "__main__":
         print("\nFinal statuses:")
         for x in report["exceptions"]:
             print(f"  #{x['exception_id']} {x['employee_id']}  {x['status']:<20} risk {x['risk']}")
-        print(f"Messages sent: {report['messages_sent']}  agent turns: {report['agent_turns']}")
+        print(
+            f"Messages: {report['messages_sent']} per exception, {report['deliveries']} delivered."
+            f"  Outreach turns: {report['agent_turns']}"
+            f" ({report['agent_turn_seconds']:.0f}s of model time)."
+            f"  Supervisor calls: {report['supervisor_calls']}"
+            f" (tokens in {report['supervisor_tokens']['input']},"
+            f" out {report['supervisor_tokens']['output']})."
+        )
+        print(f"Wall time to the lock: {morning_seconds:.0f}s")
         for e in report["estimates"]:
             print(
                 f"  estimate #{e['exception_id']} {e['path']:<14} {e['hours']:g} h"
                 f" conf {e['confidence']}  {e['status']}"
                 f" by {e['approved_by'] or '-'} final {e['final_hours']}"
+                + (f"  flag: {e['flag']}" if e["flag"] else "")
             )

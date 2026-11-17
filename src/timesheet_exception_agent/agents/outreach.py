@@ -64,7 +64,12 @@ How to work an exception:
 2. If nobody has been contacted, check the manager's presence. If the manager is \
 out_of_office, escalate immediately: message the next-level manager instead. Otherwise \
 message the manager. Use Teams when the person shows available, email otherwise.
-3. If a reply says the person is out of the office, escalate to the next-level manager now.
+3. If a reply says the person is out of the office or on leave, escalate to the next-level \
+manager now. If the manager wrote it themselves (not an automatic reply), first call \
+record_manager_leave with that reply's message_id.
+3a. A reply may answer one message that covered several employees (check_replies marks \
+it). If it clearly approves or corrects this exception's employee by name, it applies to \
+this exception; act on it for this exception only.
 4. If the follow-up time passed with no reply from the manager, escalate to the next-level \
 manager once. Do not message the next-level manager again: if they do not reply within 30 \
 minutes, the system hands the exception to the coordinator automatically.
@@ -183,6 +188,11 @@ REASONS = {
         "the system found that this exception's manager is out of the office (Teams"
         " presence or an out-of-office auto-reply on another exception); escalate to the"
         " next-level manager now, or set needs_fallback if there is none"
+    ),
+    # Set by the Supervisor (Module 5) in the last 30 minutes before the lock.
+    "priority": (
+        "the lock is close and the supervisor asked for this exception to be checked now;"
+        " read the replies and take the next step the rules allow"
     ),
 }
 
