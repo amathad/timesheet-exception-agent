@@ -139,7 +139,8 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 ## 6. Open items
 
 - Model provider decided: Claude (2026-11-02). Still worth checking whether the course offers API credits
-- Module deadlines (resolved 2026-11-12): modules have no hard deadlines of their own; everything must be complete by the course deadline. Build order follows the design, not the module numbers. The exact course deadline date is still to be recorded
+- Module deadlines (resolved 2026-11-12): modules have no hard deadlines of their own; everything must be complete by the course deadline. Build order follows the design, not the module numbers
+- **Course deadline: Mon 2026-11-23** for the complete project, with the final report and video presentation (recorded 2026-11-16). An extension of a few days can be requested, but submitting early keeps the chance of being picked for the top presentations at the final session on Wed 2026-11-25. Target: build, final report and video done by Thu 2026-11-19, then a final review and submission on Mon 2026-11-23
 - Week 3: decide pgvector only, or compare with Chroma for the design write-up. Recommendation: pgvector only (one database, SQL joins with timesheet history), explained in the write-up
 - Seed uses 7 managers, not the 4 originally planned: each manager carries one persona, so covering all 6 personas needs at least 6
 - Retrieval ranking (2026-11-05): the best rule for E-06 ranks outside the top 3, and 3 of 19 gold-set policy questions miss. Consider a reranker once the gold set is larger
