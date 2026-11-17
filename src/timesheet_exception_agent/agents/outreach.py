@@ -178,7 +178,15 @@ REASONS = {
         "it is past the 9:00 AM cut-off and the manager has not approved or corrected the"
         " time; escalate now unless the latest reply approves it or asks for a correction"
     ),
+    # Set by the router (Module 5) from what another exception showed about this manager.
+    "manager_out": (
+        "the system found that this exception's manager is out of the office (Teams"
+        " presence or an out-of-office auto-reply on another exception); escalate to the"
+        " next-level manager now, or set needs_fallback if there is none"
+    ),
 }
+
+LOCK_REASON = "lock reached with no manager decision; coordinator takes over"
 
 # Statuses still waiting on a manager. needs_fallback also wakes on a reply, since a late
 # approval before the lock can still resolve it.
@@ -199,6 +207,7 @@ class OutreachDriver:
         tools: OutreachTools,
         act: Callable[[Wake], str],
         estimator: Estimator | None = None,
+        plan: Callable[[list[Wake]], list[Wake]] | None = None,
     ):
         self.conn = conn
         self.clock = clock
@@ -207,6 +216,9 @@ class OutreachDriver:
         # With an Estimator, every hand-off (agent, 30-minute timeout or lock) gets a
         # fallback proposal at the end of the tick, and a late manager decision withdraws it.
         self.estimator = estimator
+        # With a plan hook (the Module 5 router), the tick's wakes are reordered and
+        # extended before the agent works them.
+        self.plan = plan
         self._cutoff_woken: set[int] = set()
 
     def due(self) -> list[Wake]:
@@ -251,7 +263,10 @@ class OutreachDriver:
 
     def tick(self) -> list[tuple[Wake, str]]:
         done = []
-        for wake in self.due():
+        wakes = self.due()
+        if self.plan is not None:
+            wakes = self.plan(wakes)
+        for wake in wakes:
             with self.tools.scoped(wake.exception_id):
                 summary = self.act(wake)
             self.tools.audit(
@@ -292,9 +307,11 @@ class OutreachDriver:
             if on_tick:
                 on_tick(self.clock.now(), done)
             self.clock.advance()
-        handed_off = self.tools.hand_off_unresolved(
-            "lock reached with no manager decision; coordinator takes over"
-        )
+        return self.lock()
+
+    def lock(self) -> list[int]:
+        """Deadline rule: hand everything still waiting to the coordinator, then estimate."""
+        handed_off = self.tools.hand_off_unresolved(LOCK_REASON)
         self._estimate()
         self.conn.commit()
         return handed_off

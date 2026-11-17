@@ -88,8 +88,12 @@ EXCEPTIONS = [
     ("E-06", "not_submitted"),  # no next level, no history -> team, then standard hours
 ]
 
+# Not seeded: scenario tests and live runs add it with add_duplicate(). A second exception
+# for E-01 on the same period, which Intake must mark duplicate and keep out of outreach.
+DUPLICATE = ("E-01", "not_approved")
+
 TABLES = [
-    "estimates", "audit_log", "messages", "sim_personas", "manager_stats", "presence",
+    "triage", "estimates", "audit_log", "messages", "sim_personas", "manager_stats", "presence",
     "exceptions", "timesheet_history", "pay_periods", "coordinator_states", "employees",
 ]
 
@@ -153,6 +157,16 @@ def seed(conn) -> None:
             "INSERT INTO sim_personas (manager_id, persona) VALUES (%s, %s)",
             (manager_id, persona),
         )
+
+
+def add_duplicate(conn) -> int:
+    """Add the DUPLICATE exception to the current period; return its id (9 after a seed)."""
+    emp_id, ex_type = DUPLICATE
+    return conn.execute(
+        "INSERT INTO exceptions (pay_period_id, employee_id, type)"
+        " VALUES ((SELECT max(id) FROM pay_periods), %s, %s) RETURNING id",
+        (emp_id, ex_type),
+    ).fetchone()[0]
 
 
 if __name__ == "__main__":

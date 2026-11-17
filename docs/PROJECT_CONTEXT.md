@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-12:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 in progress: the minimal code-only Estimator is merged and tested live. Next: `graph.py` with Intake and the rule-based router.
+**Status as of 2026-11-16:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 in progress: the minimal code-only Estimator is merged and tested live. Module 5 in progress: `graph.py` (LangGraph lock-day workflow with a coordinator approval pause), code-only Intake, the rule-based router and the fixed-reminder baseline are built and tested live. Next: the LLM Supervisor and its A/B against the router.
 
 ---
 
@@ -104,7 +104,9 @@ timesheet-exception-agent/
 
 Retrieval tables (12 in total): `policy_chunks` and `case_memory`, each with a `vector(384)` embedding (HNSW), a generated `tsvector` (GIN), and the embedding `model` that wrote it. They're loaded by `retrieval/ingest.py` from files, not by the seed, so reseeding keeps them; `case_memory` stores employee ids as plain text, not foreign keys, for the same reason.
 
-Estimator table (13 in total): `estimates`, one fallback proposal per exception (path, method, hours, pay code, confidence, reason, basis, status `proposed`/`withdrawn`/`approved`/`edited`/`rejected`). `approved_by` and `approved_at` stay empty until the Supervisor's approval gate. The seed clears it.
+Estimator table (13 in total): `estimates`, one fallback proposal per exception (path, method, hours, pay code, confidence, reason, basis, status `proposed`/`withdrawn`/`approved`/`edited`/`rejected`). `approved_by` and `approved_at` stay empty until the coordinator's approval gate (`agents/approval.py`), which also writes `final_hours` and `final_pay_code`, so a proposal's error can be measured. The seed clears it.
+
+Triage table (14 in total): `triage`, one row per exception (manager, lock risk 0–1 with its `factors`, `duplicate_of`), written by Intake and rescored by the router each tick. Exceptions have a new status, `duplicate`. `PostgresSaver.setup()` adds four LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`), for 18 in the database.
 
 ## 4. Build status
 
@@ -122,6 +124,10 @@ Estimator table (13 in total): `estimates`, one fallback proposal per exception 
 - [x] Module 3 retrieval, PR (a): 9 synthetic policy documents (36 chunks; 37 after PR (b)) and 21 past cases (22 after PR (b)); `policy_chunks` and `case_memory` tables; local fastembed embeddings; ingest (`uv run python -m timesheet_exception_agent.retrieval.ingest`); hybrid search; gold-set evaluation (`retrieval.eval`, results in `docs/RETRIEVAL_EVAL.md`); `tests/test_retrieval.py`
 - [x] Module 3 retrieval, PR (b): `search_policy` and `find_similar_cases` in `tools/retrieval.py` (audited), wired into Outreach with a citation prompt (`--no-retrieval` for the Module 2 agent), citation guard in `update_status`, `citation_report`; `tests/test_retrieval_tools.py`; live runs F–H in `docs/LIVE_RUNS.md`; `use_history` A/B scenario (runs I and J) where retrieval changes the handling; fixes after run I (driver retrieves policy for every reply, `history_check` in code, citations must be retrieved for the exception) checked in runs K–P
 - [x] Module 4 minimal Estimator (code only, no model, no ToT) in `agents/estimator.py`: for each exception at `needs_fallback`, proposes hours, pay code and confidence from the last two closed pay periods (`history_check` plus a pay-code check); history that fails goes to the teammate path with standard hours for the job type as the backup (standard hours alone if no teammate can be asked; teammates with an open exception of their own are excluded). Proposals only, in the new `estimates` table (13 tables); audited as actor `estimator`; withdrawn if a manager decides later. Hooked into `OutreachDriver(..., estimator=...)` and the live-run script; `tests/test_estimator.py` (26). Full suite 161 passing
+- [x] Module 5 Intake (`agents/intake.py`, code only): loads the coordinator's exceptions for the period, marks a second exception on the same employee and period `duplicate`, groups by manager, and scores lock risk (forecasting element 1) from presence, the escalation chain, history, `manager_stats`, messages and the clock, never `sim_personas`; new `triage` table (14 tables); `tests/test_intake.py`
+- [x] Module 5 rule-based router (`agents/router.py`, code only; the Supervisor's fallback and A/B baseline): rescores risk each tick, wakes a manager's other contacted exceptions with `manager_out` once the manager is known to be out (presence or an auto-reply), orders wakes by risk, and builds the approval queue (lowest confidence first); `OutreachDriver(..., plan=...)`; `tests/test_router.py`
+- [x] Fixed-reminder baseline (`agents/baseline.py`): emails the manager, fixed reminders up to the cap, never escalates, resolves on the keyword "approv"; `tests/test_baseline.py`
+- [x] `graph.py`: LangGraph workflow (intake → tick/advance loop → lock → approval `interrupt` → report), `PostgresSaver` checkpoints, coordinator approval gate (`agents/approval.py`: approve/edit/reject with initials and time, audited as `coordinator`); `--baseline`, `--duplicate`, `--decisions`; `tests/test_graph.py`. Estimator now records teammates already contacted (run Q finding). Live runs R–T in `docs/LIVE_RUNS.md`. Full suite 205 passing
 
 ## 5. Evaluation plan
 
@@ -226,3 +232,30 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Confirmed with the user: modules have no hard deadlines of their own, only the course deadline for the whole project. So gated ToT stays after `graph.py` and the Supervisor, as planned on 2026-11-10, and the deadline open item is closed.
 - **Next:** `graph.py` with Intake and the rule-based router, then the LLM Supervisor and its A/B against the router, then gated ToT in the Estimator, then the MCP server.
 - **Behind schedule:** not against module dates, which aren't binding. Still to build before the course deadline: `graph.py` and Intake, the Supervisor, gated ToT, and the MCP server. Checkpoints 4.1 and 5.1 were submitted as designs.
+
+### 2026-11-16 (Module 5)
+- Plan agreed with the user before building. Defaults confirmed:
+  - a `duplicate` status;
+  - Outreach wakes run one after another within a tick, in router order, not in parallel (shared connection, scope guard and reply simulator);
+  - checkpoints resume the approval pause, not a morning halfway;
+  - the Estimator reads `messages` for teammates already asked.
+- Work on branch `module5-graph-intake-router`.
+- Added `agents/intake.py`. Intake loads the period, dedupes, groups by manager and scores lock risk. The risk weights are placeholders for the feedback loop, and every term is stored in `triage.factors`. Schema: the `triage` table, the `duplicate` status (the status CHECK is now applied with `ALTER`, so existing databases pick it up on the next seed), and `estimates.final_hours` / `final_pay_code`. `sim/seed.py` has `add_duplicate()` (not seeded by default).
+- Added `agents/router.py`. Each tick it rescores, adds `manager_out` wakes once per exception, orders wakes by risk, and builds the approval queue. It is hooked in through `OutreachDriver(..., plan=...)`. The driver's lock step is now `OutreachDriver.lock()`, and the new `manager_out` wake reason is in `REASONS`.
+- Added `agents/baseline.py` (fixed-reminder baseline) and `agents/approval.py` (coordinator approval gate: approve, edit or reject, with initials and time; approve and edit close the exception).
+- Added `graph.py`: the LangGraph `StateGraph` with typed state, a `PostgresSaver` checkpointer, and an approval `interrupt` resumed with `Command(resume=decisions)`.
+- Estimator: teammates already messaged go in `teammates_contacted`, and the proposal says to wait for their answer (closes the run Q finding). A `duplicate` exception no longer excludes a teammate.
+- New tests: `test_intake.py`, `test_router.py`, `test_baseline.py`, `test_graph.py`, plus 2 in `test_estimator.py`. Full suite 205 passing.
+- Live runs on Haiku R (default), S (baseline, default) and T (`--duplicate --override N-02=silent`); see `docs/LIVE_RUNS.md`.
+  - On the same morning, the agent got 7 manager decisions before the lock with 10 messages. The baseline got 3 with 18 messages, and one of its 3 was wrong (E-05's correction taken as an approval).
+  - First live withdrawal of proposals after a late approval (R).
+  - The coordinator's edit, reject and approve were all recorded with initials (T).
+  - Fixed during the runs: a byte-order mark on piped initials, and risk not rescored after approvals.
+- Open:
+  - The router's `manager_out` rule didn't fire with the agent, which already escalates at first contact; it is covered by tests only.
+  - The baseline's turn count includes no-op wakes after the cap.
+  - Wakes within a tick are still sequential.
+  - The approval gate takes decisions on the console or from a file; the LLM Supervisor will own the queue.
+- Not merged yet; no PR opened.
+- **Next:** LLM Supervisor with message merging (show the scoping design before coding it), then its A/B against the router.
+- **Behind schedule:** on plan for the 2026-11-16 slot (graph, Intake, router, baseline). Still to build: the LLM Supervisor, the A/B, gated ToT, the MCP server, then the evaluation tables, report and video.

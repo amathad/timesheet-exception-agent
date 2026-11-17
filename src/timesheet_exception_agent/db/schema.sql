@@ -38,12 +38,17 @@ CREATE TABLE IF NOT EXISTS exceptions (
   pay_period_id  INT  NOT NULL REFERENCES pay_periods(id),
   employee_id    TEXT NOT NULL REFERENCES employees(id),
   type           TEXT NOT NULL CHECK (type IN ('not_submitted','not_approved','unusual_hours')),
-  status         TEXT NOT NULL DEFAULT 'open'
-                 CHECK (status IN ('open','contacted','escalated','resolved',
-                                   'correction_requested','needs_fallback','closed')),
+  status         TEXT NOT NULL DEFAULT 'open',
   next_check_at  TIMESTAMPTZ,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Kept outside CREATE TABLE so existing databases pick up new statuses on the next seed.
+-- 'duplicate' is set by Intake (Module 5) for a second exception on the same employee and
+-- period; it is never worked.
+ALTER TABLE exceptions DROP CONSTRAINT IF EXISTS exceptions_status_check;
+ALTER TABLE exceptions ADD CONSTRAINT exceptions_status_check
+  CHECK (status IN ('open','contacted','escalated','resolved',
+                    'correction_requested','needs_fallback','closed','duplicate'));
 
 CREATE TABLE IF NOT EXISTS presence (
   person_id   TEXT PRIMARY KEY REFERENCES employees(id),
@@ -99,6 +104,25 @@ CREATE TABLE IF NOT EXISTS estimates (
   proposed_at   TIMESTAMPTZ NOT NULL,
   approved_by   TEXT,
   approved_at   TIMESTAMPTZ
+);
+-- Approval gate (Module 5): what the coordinator actually entered. The proposal's hours stay
+-- as proposed, so the feedback loop can measure estimate error. approved_by holds the
+-- coordinator's initials for approved, edited and rejected decisions alike.
+ALTER TABLE estimates ADD COLUMN IF NOT EXISTS final_hours NUMERIC(5,2)
+  CHECK (final_hours >= 0);
+ALTER TABLE estimates ADD COLUMN IF NOT EXISTS final_pay_code TEXT;
+
+-- Intake / triage (Module 5, code only): one row per exception on the period being worked.
+-- risk is the lock-risk forecast (chance the exception reaches the lock with no manager
+-- decision), from facts the agents may see (never sim_personas); factors records each term.
+-- Rescored by the router every tick. duplicate_of points at the exception that is kept.
+CREATE TABLE IF NOT EXISTS triage (
+  exception_id  INT PRIMARY KEY REFERENCES exceptions(id),
+  manager_id    TEXT REFERENCES employees(id),
+  risk          NUMERIC(3,2) NOT NULL CHECK (risk BETWEEN 0 AND 1),
+  factors       JSONB NOT NULL,
+  duplicate_of  INT REFERENCES exceptions(id),
+  updated_at    TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sim_personas (

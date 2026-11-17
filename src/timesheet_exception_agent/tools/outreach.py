@@ -63,6 +63,7 @@ TRANSITIONS = {
     "needs_fallback": {"resolved", "correction_requested"},
     "resolved": set(),
     "closed": set(),
+    "duplicate": set(),  # set by Intake; never worked
 }
 
 UNTRUSTED_NOTE = (
@@ -218,7 +219,7 @@ class OutreachTools:
             raise ToolError(f"message body is longer than {MAX_BODY} characters")
 
         info = self.get_exception(exception_id)
-        if info["status"] in ("resolved", "closed"):
+        if info["status"] in ("resolved", "closed", "duplicate"):
             raise ToolError(f"exception {exception_id} is already {info['status']}")
         role = self._role(info, person_id)
         already_sent = self.conn.execute(

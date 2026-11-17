@@ -226,3 +226,24 @@ Still open: the best rule for E-06 ranks outside the top 3, and 3 gold-set quest
 **Fix after the run:** the live-run script printed proposal hours as `80.00`; it now prints `80`.
 
 The default morning (N-02 slow, which should withdraw E-04/E-07's proposals after N-02's late approval) is covered by `test_driver_withdraws_after_late_next_level_approval` but hasn't been run live.
+
+## Runs R, S, T (2026-11-16): the lock-day graph (Module 5)
+
+First runs of `graph.py` (`uv run python -m timesheet_exception_agent.graph`): Intake, then 12 ticks of the OutreachDriver with the rule-based router as its `plan` hook, the Estimator, the lock hand-off, and the coordinator approval pause (`interrupt`), checkpointed with `PostgresSaver`. R and T use Haiku 5.5 with retrieval; S uses the fixed-reminder baseline (no model). Coordinator decisions were piped in on stdin with synthetic initials `TC`. They stand in for the coordinator, so they are scripted choices, not agent decisions. Results were checked in `exceptions`, `estimates`, `messages` and `audit_log`.
+
+| | R: agent, default | S: baseline, default | T: agent, `--duplicate --override N-02=silent` |
+| --- | --- | --- | --- |
+| Decided by a manager before the lock | 7 (6 resolved, E-05 correction 72 h) | 3, **one wrong**: E-05's correction ("please don't approve it as is") was taken as an approval | 5 (4 resolved, E-05 correction) |
+| Handed to the coordinator | E-06 only (08:00, by the agent) | E-03, E-08, E-04, E-07, E-06 (at the lock; no escalation) | E-06 (agent, 08:00); E-04, E-07 (30-minute timeout, 09:00) |
+| Messages sent / agent turns | 10 / 17 | 18 / 39 (all to frontline managers; M-02, M-03 and M-05 got the 3-message cap) | 10 / 15 |
+| Estimator proposals | E-04, E-07 proposed at 09:00, **withdrawn** after N-02's 09:50 approval; E-06 proposed | 5 proposals (3 history at 0.95, 2 teammate at 0.30) | E-07 0.30, E-06 0.30, E-04 0.95 |
+| Coordinator decisions | E-06 approved 80 h | all 5 approved | E-07 **edited** to 64 h (proposal of 80 h kept), E-06 **rejected** (stays `needs_fallback`), E-04 approved 80 h |
+| Duplicate | none | none | #9 (E-01 again) marked `duplicate` by Intake, 0 messages |
+
+- **The Estimator fix works live:** in R and T, E-06's proposal says "Teammate E-09 was already asked about this exception; wait for their answer", because Outreach had emailed E-09 at 08:00. This closes the run Q finding. In S the baseline never asks a teammate, so the proposal still says to ask E-09.
+- **First live withdrawal (R):** the default-morning withdrawal, covered so far only by a test, ran live. E-04/E-07 were handed off by the 09:00 timeout, proposed, then withdrawn when N-02 approved at 09:50.
+- **Router:** no `manager_out` wakes in R or T, because the agent checks presence and escalates M-02's exceptions at first contact. In S the router woke M-02's and M-05's exceptions at 08:10, and the baseline ignored them, as designed. The rule matters when the agent contacts a manager it shouldn't have, or an auto-reply arrives on one exception before the others are worked. Both cases are covered in `tests/test_router.py`.
+- **Approval gate:** every decision has `approved_by` = `TC` and `approved_at` = 10:00 MT, and is audited as actor `coordinator`. Approve and edit close the exception; reject leaves it with the coordinator.
+- **Baseline turn count:** the baseline's 39 turns include wakes after the message cap, where it can do nothing; they are code turns with no model cost, so the count isn't comparable to the agent's.
+- **Found and fixed during the runs:** (1) PowerShell puts a byte-order mark in front of piped stdin, so the first initials were refused (the gate refused them cleanly). The prompt now strips the mark and checks initials up front. (2) Risk wasn't rescored after approvals, so a closed exception showed 1.0; the approve node now rescores.
+- `PostgresSaver.setup()` adds four LangGraph tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) to the database: 18 tables in all.
