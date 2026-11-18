@@ -132,6 +132,11 @@ ALTER TABLE estimates ADD COLUMN IF NOT EXISTS final_hours NUMERIC(5,2)
 ALTER TABLE estimates ADD COLUMN IF NOT EXISTS final_pay_code TEXT;
 -- Supervisor (Module 5): a concern about a proposal for the coordinator, at most one.
 ALTER TABLE estimates ADD COLUMN IF NOT EXISTS flag TEXT;
+-- Gated Tree-of-Thought (Module 5): the runner-up candidate, the reasoning record (candidates,
+-- scores, calls, explanation) and whether the Supervisor has used its one send-back.
+ALTER TABLE estimates ADD COLUMN IF NOT EXISTS runner_up JSONB;
+ALTER TABLE estimates ADD COLUMN IF NOT EXISTS tot JSONB;
+ALTER TABLE estimates ADD COLUMN IF NOT EXISTS sent_back BOOLEAN NOT NULL DEFAULT false;
 
 -- Intake / triage (Module 5, code only): one row per exception on the period being worked.
 -- risk is the lock-risk forecast (chance the exception reaches the lock with no manager
@@ -169,6 +174,14 @@ CREATE TABLE IF NOT EXISTS policy_chunks (
              (to_tsvector('english', title || ' ' || section || ' ' || body)) STORED,
   UNIQUE (doc, section)
 );
+-- Where and when a policy applies, from the document's States/Effective/Until lines. Policy
+-- search filters on these hard (state and lock-day date), so a rule for another state or an
+-- old edition can't be retrieved or cited. Added with ALTER so existing databases get them.
+ALTER TABLE policy_chunks ADD COLUMN IF NOT EXISTS states TEXT[] NOT NULL DEFAULT '{ALL}'
+  CHECK (cardinality(states) > 0);
+ALTER TABLE policy_chunks ADD COLUMN IF NOT EXISTS effective_from DATE NOT NULL
+  DEFAULT '2000-01-01';
+ALTER TABLE policy_chunks ADD COLUMN IF NOT EXISTS effective_to DATE;  -- exclusive; NULL = current
 CREATE INDEX IF NOT EXISTS policy_chunks_embedding_idx
   ON policy_chunks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS policy_chunks_tsv_idx ON policy_chunks USING gin (tsv);

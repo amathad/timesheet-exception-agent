@@ -99,7 +99,33 @@ def test_search_policy_is_audited_against_the_scoped_exception(conn, tools, retr
     assert details == {
         "query": "manager on leave",
         "sources": [r["citation"] for r in out["results"]],
+        "filters": {"state": "CO", "as_of": "2026-10-26"},
     }
+
+
+def test_search_policy_never_returns_other_states_or_old_editions(conn, tools, retrieval):
+    # The Utah variant and the superseded 2025 edition compete directly with these queries.
+    queries = [
+        "next-level manager response time",
+        "manager replies but has not decided, when to escalate",
+        "manager out of office on leave escalate",
+        "Utah locations 60 minutes",
+        "2025 rules one hour",
+    ]
+    with tools.scoped(E04):
+        docs = {
+            r["citation"].split(" > ")[0].lstrip("[")
+            for q in queries
+            for r in retrieval.search_policy(q)["results"]
+        }
+    assert not docs & {"escalation_ut", "escalation_2025"}
+
+
+def test_policy_scope_without_an_exception_keeps_only_rules_for_all_states(retrieval):
+    scope = retrieval.policy_scope(None)
+    assert scope["state"] is None
+    out = retrieval.search_policy("Utah locations 60 minutes next-level manager")
+    assert all("escalation_ut" not in r["citation"] for r in out["results"])
 
 
 def test_search_policy_errors_go_back_to_the_model(conn, clock, retrieval):

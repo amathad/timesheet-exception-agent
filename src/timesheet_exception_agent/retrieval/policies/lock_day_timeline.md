@@ -1,5 +1,8 @@
 # Lock-Day Timeline
 
+States: ALL
+Effective: 2026-01-01
+
 ## When the exception report is ready
 The exception report for a pay period is ready before Monday of lock week. It lists every employee whose time is unsubmitted, unapproved, or flagged for unusual hours, along with the employee's manager. Each payroll coordinator works the exceptions for the states assigned to them.
 

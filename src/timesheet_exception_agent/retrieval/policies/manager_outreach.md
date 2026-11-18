@@ -1,5 +1,8 @@
 # Contacting Managers About Exceptions
 
+States: ALL
+Effective: 2026-01-01
+
 ## Who to contact first
 The first contact for any exception is the employee's own manager, who is responsible for approving or correcting the time. Do not contact the employee directly about approval.
 

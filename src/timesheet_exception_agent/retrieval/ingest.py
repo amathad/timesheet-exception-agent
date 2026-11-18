@@ -10,7 +10,9 @@ Run (downloads the embedding model on first use):
     uv run python -m timesheet_exception_agent.retrieval.ingest
 """
 
+import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from timesheet_exception_agent.retrieval.cases import CASES, Case
@@ -20,21 +22,57 @@ POLICY_DIR = Path(__file__).resolve().parent / "policies"
 MAX_WORDS = 180
 
 
+ALL_STATES = "ALL"
+DEFAULT_EFFECTIVE = date(2000, 1, 1)
+META_KEYS = ("States", "Effective", "Until")
+
+
 @dataclass(frozen=True)
 class Chunk:
     doc: str
     title: str
     section: str
     body: str
+    # Where and when the document applies (its States/Effective/Until lines).
+    states: tuple[str, ...] = (ALL_STATES,)
+    effective_from: date = DEFAULT_EFFECTIVE
+    effective_to: date | None = None  # exclusive; None = still current
 
     def text(self) -> str:
         """What gets embedded: the body with its document and section names for context."""
         return f"{self.title}: {self.section}\n{self.body}"
 
 
+def _parse_meta(doc: str, meta: dict[str, str]) -> dict:
+    out: dict = {}
+    if "States" in meta:
+        states = tuple(s.strip().upper() for s in meta["States"].split(",") if s.strip())
+        bad = [s for s in states if s != ALL_STATES and not re.fullmatch(r"[A-Z]{2}", s)]
+        if not states or bad:
+            raise ValueError(f"{doc}: States must be ALL or two-letter codes, got {meta['States']!r}")
+        out["states"] = states
+    try:
+        if "Effective" in meta:
+            out["effective_from"] = date.fromisoformat(meta["Effective"])
+        if "Until" in meta:
+            out["effective_to"] = date.fromisoformat(meta["Until"])
+    except ValueError as e:
+        raise ValueError(f"{doc}: bad date ({e})") from e
+    if out.get("effective_to") and out["effective_to"] <= out.get(
+        "effective_from", DEFAULT_EFFECTIVE
+    ):
+        raise ValueError(f"{doc}: Until must be after Effective")
+    return out
+
+
 def chunk_markdown(doc: str, text: str, max_words: int = MAX_WORDS) -> list[Chunk]:
-    """Split one policy document into chunks, one per ## section."""
+    """Split one policy document into chunks, one per ## section.
+
+    Between the # title and the first ## heading, a document may give `States:` (ALL or
+    comma-separated two-letter codes), `Effective:` and `Until:` (ISO dates, Until
+    exclusive). Every chunk of the document carries them."""
     title = doc
+    meta: dict[str, str] = {}
     sections: list[tuple[str, list[str]]] = []
     for line in text.splitlines():
         if line.startswith("# "):
@@ -44,7 +82,12 @@ def chunk_markdown(doc: str, text: str, max_words: int = MAX_WORDS) -> list[Chun
         elif sections:
             sections[-1][1].append(line)
         elif line.strip():
-            raise ValueError(f"{doc}: text before the first ## heading")
+            key, sep, value = line.partition(":")
+            if sep and key.strip() in META_KEYS:
+                meta[key.strip()] = value.strip()
+            else:
+                raise ValueError(f"{doc}: text before the first ## heading")
+    scope = _parse_meta(doc, meta)
 
     chunks = []
     for heading, lines in sections:
@@ -54,7 +97,7 @@ def chunk_markdown(doc: str, text: str, max_words: int = MAX_WORDS) -> list[Chun
         parts = _pack(paragraphs, max_words)
         for i, body in enumerate(parts, start=1):
             section = heading if len(parts) == 1 else f"{heading} (part {i})"
-            chunks.append(Chunk(doc, title, section, body))
+            chunks.append(Chunk(doc, title, section, body, **scope))
     return chunks
 
 
@@ -85,9 +128,20 @@ def ingest_policies(conn, embedder: Embedder, chunks: list[Chunk] | None = None)
     conn.execute("DELETE FROM policy_chunks")
     for c, vec in zip(chunks, vectors):
         conn.execute(
-            "INSERT INTO policy_chunks (doc, title, section, body, model, embedding)"
-            " VALUES (%s, %s, %s, %s, %s, %s::vector)",
-            (c.doc, c.title, c.section, c.body, embedder.name, to_pgvector(vec)),
+            "INSERT INTO policy_chunks (doc, title, section, body, states,"
+            " effective_from, effective_to, model, embedding)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)",
+            (
+                c.doc,
+                c.title,
+                c.section,
+                c.body,
+                list(c.states),
+                c.effective_from,
+                c.effective_to,
+                embedder.name,
+                to_pgvector(vec),
+            ),
         )
     return len(chunks)
 

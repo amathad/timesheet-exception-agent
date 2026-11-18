@@ -236,6 +236,7 @@ def run_one(conn, saver, scenario: Scenario, arm: str, rep: int, model, embedder
         use_retrieval=not baseline,
         model=None if baseline else model,
         embedder=None if baseline else embedder,
+        tot=False,  # AB1-AB63 ran before gated ToT; keep reruns comparable
         decide=approve_all,
         on_lock=on_lock,
         details=details,

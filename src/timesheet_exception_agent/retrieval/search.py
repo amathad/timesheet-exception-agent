@@ -7,6 +7,9 @@ rankings with reciprocal rank fusion (RRF). Embeddings catch paraphrases ("on va
 "retro"). mode="vector" or mode="keyword" runs one ranking alone, for evaluation.
 
 Results carry their source (document and section, or case id) so answers can cite them.
+Policy searches can be limited hard to one state and one date (`state=`, `as_of=`), so a rule
+for another state or an edition no longer in effect never reaches the agent; the agent's
+tools always apply both.
 Retrieved text is reference material: business rules are still enforced in code.
 """
 
@@ -35,10 +38,26 @@ class Corpus:
     table: str
     columns: tuple[str, ...]
     filters: tuple[str, ...]  # columns a caller may filter on with equality
+    # Rows carry states/effective_from/effective_to, so `state` and `as_of` filters apply.
+    scoped: bool = False
 
+
+SCOPE_FILTERS = ("state", "as_of")
 
 POLICIES = Corpus(
-    "policy_chunks", ("id", "doc", "title", "section", "body"), filters=("doc",)
+    "policy_chunks",
+    (
+        "id",
+        "doc",
+        "title",
+        "section",
+        "body",
+        "states",
+        "effective_from",
+        "effective_to",
+    ),
+    filters=("doc",),
+    scoped=True,
 )
 CASES = Corpus(
     "case_memory",
@@ -68,15 +87,33 @@ def rrf(rankings: list[list], k: int = RRF_K) -> list[tuple[object, float]]:
 
 
 def _where(corpus: Corpus, model: str, filters: dict) -> tuple[str, list]:
-    unknown = set(filters) - set(corpus.filters)
+    """SQL condition for the filters. Equality on the corpus's filter columns, plus, for a
+    scoped corpus, `state` (rows for that state or for ALL; state=None keeps only ALL) and
+    `as_of` (rows in effect on that date: effective_from <= as_of < effective_to)."""
+    allowed = set(corpus.filters) | (set(SCOPE_FILTERS) if corpus.scoped else set())
+    unknown = set(filters) - allowed
     if unknown:
         raise RetrievalError(
-            f"cannot filter {corpus.table} on {sorted(unknown)}; allowed: {list(corpus.filters)}"
+            f"cannot filter {corpus.table} on {sorted(unknown)}; allowed: {sorted(allowed)}"
         )
     clauses, params = ["model = %s"], [model]
     for col, value in sorted(filters.items()):
-        clauses.append(f"{col} = %s")
-        params.append(value)
+        if col == "state":
+            if value is None:
+                clauses.append("'ALL' = ANY(states)")
+            else:
+                clauses.append("(%s = ANY(states) OR 'ALL' = ANY(states))")
+                params.append(str(value).upper())
+        elif col == "as_of":
+            if value is None:
+                raise RetrievalError("as_of needs a date")
+            clauses.append(
+                "effective_from <= %s AND (effective_to IS NULL OR effective_to > %s)"
+            )
+            params.extend([value, value])
+        else:
+            clauses.append(f"{col} = %s")
+            params.append(value)
     return " AND ".join(clauses), params
 
 

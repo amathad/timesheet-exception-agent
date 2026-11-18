@@ -11,6 +11,10 @@ history, manager presence, escalation chain, status) plus the latest reply. It n
 sim_personas, which exists only for the simulation. Whether the employee's pay history can
 be copied is a business rule, decided here in code (history_check), not by the model.
 
+Policy searches are always limited, in code, to rules for the employee's state (or all
+states) that are in effect on the simulated date, so a wrong-state or superseded rule can't
+be retrieved or cited. The filters are audited with each search.
+
 policy_for_reply is for the driver, not the model: on a wake that follows a reply, code
 searches the handbook with the reply text, so the agent always has the rules that may apply
 in front of it when it decides, instead of only when it chooses to search.
@@ -98,8 +102,9 @@ class RetrievalTools:
         return self._search_policy(reply[:MAX_QUERY], exception_id, DRIVER)
 
     def _search_policy(self, query: str, exception_id: int | None, actor: str) -> dict:
+        scope = self.policy_scope(exception_id)
         try:
-            rows = search_policies(self.conn, self.embedder, query, k=TOP_K)
+            rows = search_policies(self.conn, self.embedder, query, k=TOP_K, **scope)
         except RetrievalError as e:
             raise ToolError(str(e)) from e
         results = [
@@ -115,7 +120,11 @@ class RetrievalTools:
             "search_policy",
             exception_id,
             f"policy search: {query}",
-            {"query": query, "sources": [r["citation"] for r in results]},
+            {
+                "query": query,
+                "sources": [r["citation"] for r in results],
+                "filters": {"state": scope["state"], "as_of": scope["as_of"].isoformat()},
+            },
             actor=actor,
         )
         return {"query": query, "note": REFERENCE_NOTE, "results": results}
@@ -176,6 +185,19 @@ class RetrievalTools:
             )
             for f in (self.search_policy, self.find_similar_cases)
         ]
+
+    def policy_scope(self, exception_id: int | None) -> dict:
+        """Hard filters for every policy search, decided in code: the employee's state and
+        the lock-day date. With no exception in scope, only rules for all states apply."""
+        state = None
+        if exception_id is not None:
+            row = self.conn.execute(
+                "SELECT e.state FROM exceptions x JOIN employees e ON e.id = x.employee_id"
+                " WHERE x.id = %s",
+                (exception_id,),
+            ).fetchone()
+            state = row[0] if row else None
+        return {"state": state, "as_of": self.clock.now().date()}
 
     # Helpers
 

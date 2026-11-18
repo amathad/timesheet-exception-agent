@@ -6,7 +6,8 @@ on events and may adjust that plan through a fixed set of tools, each of which r
 illegal moves in code:
 
 - review (after a reply, a hand-off or a new estimate since its last review):
-  get_overview, escalate_group, wake_now, flag_estimate
+  get_overview, escalate_group, wake_now, flag_estimate (a Tree-of-Thought proposal is sent
+  back to the Estimator once, with the concern, before it is flagged)
 - merge (when two or more drafts go to the same person and channel in a tick):
   merge_messages
 - queue (at the lock, when there are proposals to approve): write_queue
@@ -73,7 +74,8 @@ already escalated or handed to the coordinator need nothing from you.
 - Within 30 minutes of the lock, call wake_now for a waiting exception with high risk that \
 is not already being worked this tick, if waiting for its timer would leave no time.
 - If a proposed estimate conflicts with what a manager wrote (for example different \
-hours), call flag_estimate once with the conflict in one sentence.\
+hours), call flag_estimate once with the conflict in one sentence. A reasoned proposal is \
+sent back to the Estimator once with your concern before it is flagged.\
 """
 
 MERGE_TASK = """\
@@ -97,11 +99,14 @@ check. Call write_queue once. You cannot change hours, pay codes or confidence.\
 
 
 class SupervisorTools:
-    def __init__(self, conn, clock: SimClock, router: Router, outbox: Outbox) -> None:
+    def __init__(
+        self, conn, clock: SimClock, router: Router, outbox: Outbox, estimator=None
+    ) -> None:
         self.conn = conn
         self.clock = clock
         self.router = router
         self.outbox = outbox
+        self.estimator = estimator  # for the one send-back of a Tree-of-Thought proposal
         self.reset()
 
     def reset(self, wakes=(), groups=(), queue=()) -> None:
@@ -262,23 +267,46 @@ class SupervisorTools:
         return {"exception_id": exception_id, "woken": True}
 
     def flag_estimate(self, exception_id: int, concern: str) -> dict:
-        """Add one concern to a fallback proposal for the coordinator, for example a
-        manager's reply that conflicts with the proposed hours. Once per proposal."""
+        """Raise one concern about a fallback proposal, for example a manager's reply that
+        conflicts with the proposed hours. Once per proposal. If the Estimator reasoned
+        about it (Tree-of-Thought), it is sent back once with your concern first; the
+        proposal is flagged for the coordinator only if the recommendation stays the same.
+        Other proposals are flagged straight away."""
         concern = concern.strip()
         if not concern or len(concern) > MAX_NOTE:
             raise ToolError(f"the concern must be 1 to {MAX_NOTE} characters")
         row = self.conn.execute(
-            "SELECT status, flag FROM estimates WHERE exception_id = %s", (exception_id,)
+            "SELECT status, flag, tot IS NOT NULL, sent_back FROM estimates"
+            " WHERE exception_id = %s",
+            (exception_id,),
         ).fetchone()
         if row is None or row[0] != "proposed":
             raise ToolError(f"exception {exception_id} has no proposal waiting")
-        if row[1]:
-            raise ToolError(f"the proposal for exception {exception_id} is already flagged")
+        _, flag, has_tot, sent_back = row
+        if flag or sent_back:
+            raise ToolError(
+                f"the proposal for exception {exception_id} already had its one concern"
+            )
+        out = {"exception_id": exception_id, "sent_back": False, "flagged": True}
+        if has_tot and self.estimator is not None:
+            from timesheet_exception_agent.agents.estimator import EstimateError
+
+            try:
+                result = self.estimator.send_back(exception_id, concern)
+            except EstimateError as e:
+                raise ToolError(str(e)) from e
+            out.update(sent_back=True, changed=result["changed"],
+                       hours=result["hours"], pay_code=result["pay_code"])
+            if result["changed"]:
+                out["flagged"] = False
+                self._audit("flag_estimate", exception_id, concern, out)
+                return out
+            concern = f"{concern} (still the recommendation after one send-back)"[:MAX_NOTE + 60]
         self.conn.execute(
             "UPDATE estimates SET flag = %s WHERE exception_id = %s", (concern, exception_id)
         )
-        self._audit("flag_estimate", exception_id, concern, {})
-        return {"exception_id": exception_id, "flagged": True}
+        self._audit("flag_estimate", exception_id, concern, out)
+        return out
 
     # Merge
 
@@ -365,11 +393,12 @@ class Supervisor:
         router: Router,
         outbox: Outbox,
         model: BaseChatModel | None = None,
+        estimator=None,
     ) -> None:
         self.conn = conn
         self.clock = clock
         self.router = router
-        self.tools = SupervisorTools(conn, clock, router, outbox)
+        self.tools = SupervisorTools(conn, clock, router, outbox, estimator=estimator)
         model = model or default_model()
         self.agents = {
             phase: create_agent(model, self.tools.as_tools(names), system_prompt=SYSTEM_PROMPT)
@@ -420,6 +449,11 @@ class Supervisor:
         text = "\n".join(
             f"- exception {q['exception_id']} {q['employee']}: {q['path']}, {q['hours']:g} h"
             f" {q['pay_code']}, confidence {q['confidence']}"
+            + (
+                f", runner-up {q['runner_up']['hours']:g} h {q['runner_up']['pay_code']}"
+                if q.get("runner_up")
+                else ""
+            )
             + (f", flag: {q['flag']}" if q.get("flag") else "")
             for q in queue
         )

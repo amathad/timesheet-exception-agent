@@ -1,5 +1,8 @@
 # Teammate Confirmation and Standard Hours
 
+States: ALL
+Effective: 2026-01-01
+
 ## Asking a teammate
 When history cannot be used, the coordinator may ask someone on the employee's team, usually a teammate under the same manager, whether the employee worked their regular schedule. Ask about the employee's recent hours only; a teammate cannot approve time. The coordinator has until end of day Monday for this.
 

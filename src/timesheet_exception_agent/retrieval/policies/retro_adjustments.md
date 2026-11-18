@@ -1,5 +1,8 @@
 # Retro Adjustments
 
+States: ALL
+Effective: 2026-01-01
+
 ## What a retro adjustment is
 A retro adjustment corrects hours or pay codes for a pay period that has already been processed. It is paid or recovered on a later paycheck rather than the current one.
 
