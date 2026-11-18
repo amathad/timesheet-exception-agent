@@ -82,7 +82,7 @@ class Router:
         """Proposals waiting for the coordinator, lowest confidence first."""
         rows = self.conn.execute(
             "SELECT s.exception_id, x.employee_id, e.name, s.path, s.hours, s.pay_code,"
-            "  s.confidence, s.reason, s.flag FROM estimates s"
+            "  s.confidence, s.reason, s.flag, s.runner_up FROM estimates s"
             " JOIN exceptions x ON x.id = s.exception_id"
             " JOIN employees e ON e.id = x.employee_id"
             " WHERE s.status = 'proposed' AND x.status = 'needs_fallback'"
@@ -99,9 +99,12 @@ class Router:
                 "confidence": float(confidence),
                 "reason": reason,
                 "flag": flag,
+                "runner_up": runner_up,
             }
-            for exception_id, employee_id, name, path, hours, code, confidence, reason, flag
-            in rows
+            for (
+                exception_id, employee_id, name, path, hours, code, confidence, reason, flag,
+                runner_up,
+            ) in rows
         ]
 
     def _audit(self, action, exception_id, reason, details) -> None:

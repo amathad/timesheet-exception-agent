@@ -1,5 +1,8 @@
 # Escalation to the Next-Level Manager
 
+States: ALL
+Effective: 2026-01-01
+
 ## The escalation chain
 The next-level manager is the manager's own manager. They are the only escalation step before the coordinator takes over. Some managers have no next-level manager; see the fallback policy for those cases.
 

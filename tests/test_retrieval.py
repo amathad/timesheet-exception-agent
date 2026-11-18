@@ -1,4 +1,5 @@
 import math
+from datetime import date
 
 import pytest
 
@@ -13,6 +14,7 @@ from timesheet_exception_agent.retrieval.eval import (
 )
 from timesheet_exception_agent.retrieval.ingest import (
     MAX_WORDS,
+    POLICY_DIR,
     chunk_markdown,
     ingest,
     load_policies,
@@ -80,9 +82,33 @@ def test_chunk_markdown_rejects_text_outside_sections():
         chunk_markdown("doc", "# T\n## Empty\n\n## S\nbody\n")
 
 
+def test_chunk_markdown_reads_state_and_dates():
+    text = "# T\n\nStates: CO, ut\nEffective: 2025-01-01\nUntil: 2026-01-01\n\n## S\nbody\n"
+    [c] = chunk_markdown("doc", text)
+    assert c.states == ("CO", "UT")
+    assert (c.effective_from, c.effective_to) == (date(2025, 1, 1), date(2026, 1, 1))
+    [d] = chunk_markdown("doc", "# T\n## S\nbody\n")
+    assert (d.states, d.effective_to) == (("ALL",), None)
+
+
+@pytest.mark.parametrize(
+    "meta",
+    ["States: Colorado", "Effective: soon", "Effective: 2026-01-01\nUntil: 2025-01-01"],
+)
+def test_chunk_markdown_rejects_bad_metadata(meta):
+    with pytest.raises(ValueError):
+        chunk_markdown("doc", f"# T\n{meta}\n## S\nbody\n")
+
+
+def test_every_policy_states_where_and_when_it_applies():
+    for path in POLICY_DIR.glob("*.md"):
+        head = path.read_text(encoding="utf-8").split("\n## ")[0]
+        assert "States:" in head and "Effective:" in head, path.name
+
+
 def test_policy_corpus_loads():
     chunks = load_policies()
-    assert len({c.doc for c in chunks}) == 9
+    assert len({c.doc for c in chunks}) == 11
     keys = [(c.doc, c.section) for c in chunks]
     assert len(keys) == len(set(keys))
     assert all(len(c.body.split()) <= MAX_WORDS for c in chunks)
@@ -188,6 +214,25 @@ def test_case_search_filters_on_columns(ingested, embedder):
         search_cases(ingested, embedder, "anything", body="x")
 
 
+def test_policy_search_filters_on_state_and_date(ingested, embedder):
+    q = "next-level manager response time"
+    keys = lambda **f: {  # noqa: E731
+        r["doc"] for r in search_policies(ingested, embedder, q, k=50, **f)
+    }
+    everything = keys()
+    assert {"escalation_ut", "escalation_2025"} <= everything
+    co_now = keys(state="CO", as_of=date(2026, 10, 26))
+    assert "escalation" in co_now and not co_now & {"escalation_ut", "escalation_2025"}
+    assert "escalation_ut" in keys(state="ut", as_of=date(2026, 10, 26))
+    in_2025 = keys(state="CO", as_of=date(2025, 6, 1))
+    assert "escalation_2025" in in_2025 and "escalation" not in in_2025
+    assert "escalation_ut" not in keys(state=None, as_of=date(2026, 10, 26))
+    with pytest.raises(RetrievalError):
+        search_cases(ingested, embedder, q, state="CO")
+    with pytest.raises(RetrievalError):
+        search_policies(ingested, embedder, q, as_of=None)
+
+
 def test_search_rejects_bad_input(ingested, embedder):
     with pytest.raises(RetrievalError):
         search_policies(ingested, embedder, "   ")
@@ -223,6 +268,7 @@ def test_gold_set_recall_with_real_model(conn, fastembed_model):
     report = evaluate(conn, fastembed_model, k=3)
     # Floors a little under the measured values (docs/RETRIEVAL_EVAL.md) to catch regressions.
     assert report["policies"]["hybrid"]["recall@3"] >= 0.75
+    assert report["policies"]["hybrid"]["out_of_scope@3"] == 0
     assert report["cases"]["hybrid"]["recall@3"] >= 0.85
 
 

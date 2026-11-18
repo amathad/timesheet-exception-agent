@@ -131,7 +131,7 @@ def test_flag_estimate_once(sup_tools, parts, conn, clock):
     tools.hand_off([E04], "test")
     Estimator(conn, clock).sync()
     sup_tools.flag_estimate(E04, "The manager mentioned a short week.")
-    with pytest.raises(ToolError, match="already flagged"):
+    with pytest.raises(ToolError, match="already had its one concern"):
         sup_tools.flag_estimate(E04, "again")
     with pytest.raises(ToolError, match="no proposal"):
         sup_tools.flag_estimate(E01, "nothing here")

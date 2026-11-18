@@ -1,5 +1,8 @@
 # Approving Time From Pay History
 
+States: ALL
+Effective: 2026-01-01
+
 ## When the coordinator uses history
 If neither the manager nor the next-level manager responds in time, the coordinator approves the employee's time from their last two pay periods. The agent may propose these hours, but only the coordinator approves or enters them.
 

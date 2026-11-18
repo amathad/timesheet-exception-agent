@@ -298,3 +298,29 @@ Runs U1 to W used the Outreach prompt from before the merged-reply fix; W2 uses 
 - **New scenario `late`** (`M-03=late`, `N-02=silent`): M-03 approved at 09:35, after both exceptions went to the coordinator at 09:00. In all 6 agent runs both were resolved and both proposals withdrawn.
 - Outreach token use is now recorded in each `agent_turn` audit entry: about 295k input and 12k output tokens per morning, $0.036 at Haiku 5.5 prices. The whole A/B cost $2.13.
 
+
+## Runs X1 to X4 (2026-11-18): gated Tree-of-Thought in the Estimator (Module 5)
+
+Four lock mornings with `uv run python -m timesheet_exception_agent.graph --override N-02=silent --decisions <empty list>` on Haiku 5.5, retrieval on, parallel 4; X3 also with `--supervisor`. With N-02 silent, E-04, E-07 and E-06 reach the coordinator at the lock, as in run Q. The empty decisions file leaves every proposal at `proposed` so it can be read from `estimates`. Policy search ran with the new state and date filters (Colorado, 2026-10-26) on every call.
+
+What the gate did, the same in all four runs:
+- **E-04** (80, 80): history passes the check, so there's no ToT and the history path is used (80 h, 0.95).
+- **E-06** (new hire): standard hours is the only candidate, so there's no ToT (80 h, 0.30).
+- **E-07** (80, 80, then 64): two candidates, A = 64 h (the last period) and B = 80 h (the two earlier periods, and also standard hours). ToT ran with 5 calls each time (2 evaluate, 2 critique, 1 explain), about 6–10k tokens.
+
+In the synthetic data the known answer for E-07 is 64 h: past case P3-01 says the employee moved to a reduced schedule and that the 80-hour periods no longer predict their hours.
+
+| Run | Change before the run | E-07 proposal | Runner-up | Confidence | Notes |
+| --- | --- | --- | --- | ---: | --- |
+| X1 | first version | 80 h | 64 h | 0.45 | Similar-case search returned P3-07, P2-02 and P3-05, not P3-01, so the tree never saw the reduced schedule; the critic called the 64 h period "unexplained". Explanation refused (length) and replaced by the template |
+| X2 | the employee's own past cases added by SQL; refused explanations kept | 64 h | 80 h | 0.33 | P3-01 reached the tree, and A won the critique 3 to 2. Low confidence because P3-01 confirms the reduced schedule only for the last closed period. Explanation refused again, only for length (752 characters, hours check passed) |
+| X3 | explanation limit 900 characters, prompt asks for 90 words; `--supervisor` | 64 h | 80 h | 0.33 | The explanation passed the checks but argued for B ("Candidate B is the better fallback"), against code's choice. The Supervisor merged messages and ordered the queue; it didn't flag or send back E-07 |
+| X4 | explain step returns `agrees`; on disagreement the policy-safe candidate wins at minimum confidence and the proposal is flagged | 80 h, flagged | 64 h | 0.30 | Scores favored A (critic 4 against 2); the self-check disagreed, so code proposed 80 h with 64 h as runner-up and flagged it. The explanation says to confirm with Indira Pell whether the reduced schedule carries into the open period |
+
+**Findings:**
+- **The gate works.** The model ran only on the exception with conflicting history, and never proposed hours of its own: every proposal and runner-up is one of the candidates code built.
+- **Evidence mattered more than reasoning.** In X1 the right case wasn't retrieved, and the tree made a reasonable choice from what it had. Fix: an employee's own past cases now come by SQL lookup, not by ranking, because similar-case search can miss them.
+- **The explanation needs its own check.** In X3 the model's explanation argued against the choice the scores had made. Without a check, the coordinator would have seen "recommended 64 h" next to a paragraph arguing for 80 h. The self-check (`agrees`) turns that split into a flag and minimum confidence, which Checkpoint 6.1 lists as a reason for priority review. This draws on the Module 6 reading on models judging their own answers (Kadavath et al., 2022).
+- **E-07 is genuinely ambiguous**, and the outcome varies between 64 h at 0.33 and 80 h flagged. In both cases the coordinator sees both numbers, the runner-up and what to check. Confidence stayed at or near the minimum each time, which is right for a case where the evidence covers only the previous period.
+- **Cost:** 5 ToT calls and about 10k tokens per run (about $0.01 on Haiku), against about 250k Outreach input tokens.
+- **Supervisor send-back:** not triggered live. The Supervisor saw no manager reply that conflicted with an estimate. It's covered by tests (`tests/test_tot.py`): a send-back that changes the recommendation clears the concern; one that doesn't change it flags the proposal.

@@ -8,15 +8,25 @@ Metrics per corpus and mode:
 - hit@1: the top result answers the question
 - recall@k: an answer is in the top k (one target per question, so recall@k = hit@k)
 - MRR: mean of 1 / rank of the first answer within the top 10, 0 if none
+- out_of_scope@k (policies): share of questions whose top k holds a section that does not
+  apply (another state's rule, or an edition not in effect on the lock day)
+
+Policies are scored twice: with the hard state and date filters the agent's tools always
+apply (SCOPE: the seed's state on lock day), and unfiltered, to show what the filters stop.
 
 Run after ingest:
     uv run python -m timesheet_exception_agent.retrieval.eval
 """
 
+from datetime import date
+
 from timesheet_exception_agent.retrieval.embeddings import Embedder
 from timesheet_exception_agent.retrieval.search import CASES, MODES, POLICIES, search
+from timesheet_exception_agent.sim.clock import LOCK
 
 DEPTH = 10  # ranks looked at for MRR
+# What the agent's tools filter on in the seeded run: Colorado, on lock day.
+SCOPE = {"state": "CO", "as_of": LOCK.date()}
 
 # (question, {(doc, section), ...})
 POLICY_GOLD = [
@@ -155,30 +165,54 @@ def score(ranked_keys: list[list], gold: list[set], k: int) -> dict[str, float]:
     return {"hit@1": hit1 / n, f"recall@{k}": hitk / n, "mrr": rr / n}
 
 
-def evaluate(conn, embedder: Embedder, k: int = 3) -> dict[str, dict[str, dict]]:
-    """{corpus: {mode: metrics}} over the gold sets."""
+def in_scope(row: dict, state: str, as_of: date) -> bool:
+    """Whether a policy row applies to that state on that date."""
+    return (
+        ("ALL" in row["states"] or state in row["states"])
+        and row["effective_from"] <= as_of
+        and (row["effective_to"] is None or row["effective_to"] > as_of)
+    )
+
+
+def evaluate(
+    conn, embedder: Embedder, k: int = 3, scope: dict = SCOPE
+) -> dict[str, dict[str, dict]]:
+    """{corpus: {mode: metrics}} over the gold sets. "policies" uses the scope filters,
+    "policies_unfiltered" doesn't; both report out_of_scope@k."""
     suites = {
-        "policies": (POLICIES, POLICY_GOLD, _policy_key),
-        "cases": (CASES, CASE_GOLD, _case_key),
+        "policies": (POLICIES, POLICY_GOLD, _policy_key, scope),
+        "policies_unfiltered": (POLICIES, POLICY_GOLD, _policy_key, {}),
+        "cases": (CASES, CASE_GOLD, _case_key, {}),
     }
     report = {}
-    for name, (corpus, gold, key) in suites.items():
+    for name, (corpus, gold, key, filters) in suites.items():
         report[name] = {}
         for mode in MODES:
-            ranked = [
-                [key(r) for r in search(conn, embedder, corpus, q, k=DEPTH, mode=mode)]
+            rows = [
+                search(conn, embedder, corpus, q, k=DEPTH, mode=mode, **filters)
                 for q, _ in gold
             ]
-            report[name][mode] = score(ranked, [answers for _, answers in gold], k)
+            ranked = [[key(r) for r in rs] for rs in rows]
+            metrics = score(ranked, [answers for _, answers in gold], k)
+            if corpus is POLICIES:
+                leaks = sum(
+                    any(not in_scope(r, scope["state"], scope["as_of"]) for r in rs[:k])
+                    for rs in rows
+                )
+                metrics[f"out_of_scope@{k}"] = leaks / len(gold)
+            report[name][mode] = metrics
     return report
 
 
-def misses(conn, embedder: Embedder, k: int = 3, mode: str = "hybrid") -> list[str]:
-    """Policy questions whose answer is not in the top k, for error analysis."""
+def misses(
+    conn, embedder: Embedder, k: int = 3, mode: str = "hybrid", scope: dict = SCOPE
+) -> list[str]:
+    """Policy questions whose answer is not in the top k (with the scope filters)."""
     out = []
     for q, answers in POLICY_GOLD:
         top = [
-            _policy_key(r) for r in search(conn, embedder, POLICIES, q, k=k, mode=mode)
+            _policy_key(r)
+            for r in search(conn, embedder, POLICIES, q, k=k, mode=mode, **scope)
         ]
         if not answers & set(top):
             out.append(f"{q}\n    got: {top}")
@@ -200,12 +234,17 @@ if __name__ == "__main__":
         print(
             f"Gold set: {len(POLICY_GOLD)} policy questions, {len(CASE_GOLD)} case questions\n"
         )
-        print(f"{'corpus':10} {'mode':8} {'hit@1':>6} {f'recall@{k}':>9} {'MRR':>6}")
+        print(f"Policy scope: state {SCOPE['state']}, as of {SCOPE['as_of']}\n")
+        print(
+            f"{'corpus':20} {'mode':8} {'hit@1':>6} {f'recall@{k}':>9} {'MRR':>6}"
+            f" {f'out_of_scope@{k}':>15}"
+        )
         for corpus, modes in report.items():
             for mode, m in modes.items():
+                oos = m.get(f"out_of_scope@{k}")
                 print(
-                    f"{corpus:10} {mode:8} {m['hit@1']:6.2f} {m[f'recall@{k}']:9.2f}"
-                    f" {m['mrr']:6.2f}"
+                    f"{corpus:20} {mode:8} {m['hit@1']:6.2f} {m[f'recall@{k}']:9.2f}"
+                    f" {m['mrr']:6.2f} {'' if oos is None else f'{oos:15.2f}'}"
                 )
         missed = misses(conn, embedder, k)
         print(f"\nHybrid policy misses at k={k}: {len(missed)}")

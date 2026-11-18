@@ -1,5 +1,8 @@
 # Paid Time Off Accrual
 
+States: ALL
+Effective: 2026-01-01
+
 ## How PTO accrues
 Full-time employees accrue paid time off each pay period based on years of service. Part-time employees accrue PTO in proportion to hours worked. Accrual balances appear on each pay statement.
 
