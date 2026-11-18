@@ -308,7 +308,7 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
   - Router and Supervisor: the same status on every exception in every run (57 decisions, 0 wrong outcomes, 0 wrongful approvals, 15 hand-offs over the 9 scenarios). The Supervisor never used `escalate_group` or `wake_now`; it cost about 17% more tokens and doubled wall time.
   - Agent against baseline: 57 decisions against 25, 0 wrong outcomes against wrong outcomes in all 9 baseline runs, 0 wrongful approvals against 11, and 100 messages against 172.
   - Decision: the router stays the default; the Supervisor stays behind `--supervisor` as the documented experiment.
-- Not committed yet; no PR opened.
+- Merged as PR #11 (squash, `90448dd`) into `master`.
 - Open:
   - The Supervisor may matter at a larger scale (20–30 exceptions, manager facts arriving at different times); not tested.
   - Prompt caching would cut Outreach cost (most input is the same prompt, tools and policy on every turn); not changed, to keep the A/B comparable.
