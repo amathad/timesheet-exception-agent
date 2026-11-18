@@ -10,7 +10,7 @@ uv run python -m timesheet_exception_agent.agents.outreach --override N-02=silen
 ```
 
 - Since Module 3 the agent also has the retrieval tools (`search_policy`, `find_similar_cases`). Load the corpus once with `uv run python -m timesheet_exception_agent.retrieval.ingest`; the run stops with that command if it's missing. `--no-retrieval` runs the Module 2 agent (7 tools, original prompt) for comparison.
-- `--override PERSON=KIND` (repeatable) changes how one person replies for a run. Kinds are in `sim/personas.py`: `responsive`, `slow`, `correction`, `on_leave`, `no_next_level`, `silent`, `ambiguous`, `injection`, `stalling`.
+- `--override PERSON=KIND` (repeatable) changes how one person replies for a run. Kinds are in `sim/personas.py`: `responsive`, `slow`, `correction`, `on_leave`, `no_next_level`, `silent`, `ambiguous`, `injection`, `stalling`, `use_history`, `on_leave_teams`, `late`.
 - Needs `ANTHROPIC_API_KEY` in `.env`. The model comes from `LLM_MODEL` (local `.env`: `anthropic:claude-haiku-5-5`, about $0.05 per run; code default `anthropic:claude-opus-5-5`, about $2). Claude Pro does not cover API usage.
 - Docker Desktop must be running (`docker ps`; if down, start Docker Desktop, then `docker compose up -d`).
 - Every run reseeds the database, which clears the previous run's `messages` and `audit_log`. The model, effort and overrides are saved in a `run_started` audit entry.
@@ -39,6 +39,7 @@ All runs on Claude Haiku 5.5, effort medium.
 | N | 2026-11-05 | none, after fixes 1–3 | same outcomes as runs F and H |
 | O, P | 2026-11-05 | `M-03=use_history`, then none, after the stricter citation guard | as K–M and N; every citation retrieved, no refusals |
 | Q | 2026-11-12 | `N-02=silent`, with retrieval and the Estimator | same outcomes as runs 3 and G; Estimator proposed for all 3 hand-offs (E-04 history 80 h at 0.95; E-07 and E-06 teammate path, 80 h standard at 0.30); nothing approved |
+| AB1–AB63 | 2026-11-18 | 9 scenarios × router, Supervisor (3 runs each) and baseline (1 each) | Supervisor and router identical on every exception in every run; agent 57 decisions and 0 wrong outcomes against the baseline's 25 and wrong outcomes in all 9 runs; see `docs/AB_RESULTS.md` |
 
 ## Run 1 (2026-11-03): first live run
 
@@ -286,3 +287,14 @@ All runs are on Haiku 5.5 with retrieval. As in runs R to T, the coordinator's d
 - The agent recorded the same leave reply twice in W0. `record_manager_leave` now ignores a repeat for the same reply.
 
 Runs U1 to W used the Outreach prompt from before the merged-reply fix; W2 uses the final prompt. The Supervisor-against-router A/B (next) reruns every scenario on the final code.
+
+## Runs AB1 to AB63 (2026-11-18): Supervisor A/B against the router (Module 5)
+
+63 lock mornings run with `uv run python -m timesheet_exception_agent.ab` on the final Module 5 code: 9 scenarios, 3 runs each for the router and Supervisor arms, 1 for the fixed-reminder baseline. Haiku 5.5 with retrieval, parallel 4, merged delivery. At the approval pause the script approved everything under the synthetic initials `TC`. Metrics were read from the database at the lock of every run, before the next reseed; raw rows (with thread ids) are in `docs/ab/runs.jsonl`, and the tables, findings and decision are in `docs/AB_RESULTS.md`.
+
+- Pass 1 (one run of every arm and scenario) was checked first: statuses, estimates and Supervisor actions per run. No problems; one count was added before passes 2 and 3 (`merges_refused`, to see why one Supervisor run delivered more messages: it was zero in every run, so the difference was drafting time).
+- **Router and Supervisor:** the same status on every exception in all 27 pairs of runs. The Supervisor merged bodies, ordered the queue and flagged 3 estimates; it never called `escalate_group` or `wake_now`. It cost about 17% more tokens and doubled wall time (70 s against 37 s).
+- **Agent against baseline:** 57 manager decisions against 25, 0 wrong outcomes and 0 wrongful approvals against wrong outcomes in all 9 runs and 11 wrongful approvals, and 100 messages against 172.
+- **New scenario `late`** (`M-03=late`, `N-02=silent`): M-03 approved at 09:35, after both exceptions went to the coordinator at 09:00. In all 6 agent runs both were resolved and both proposals withdrawn.
+- Outreach token use is now recorded in each `agent_turn` audit entry: about 295k input and 12k output tokens per morning, $0.036 at Haiku 5.5 prices. The whole A/B cost $2.13.
+

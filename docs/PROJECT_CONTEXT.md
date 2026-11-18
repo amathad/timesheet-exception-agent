@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-17:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 in progress: the minimal code-only Estimator is merged and tested live. Module 5 in progress: `graph.py` (LangGraph lock-day workflow with parallel Outreach and a coordinator approval pause), code-only Intake, the rule-based router, the fixed-reminder baseline, merged delivery and the LLM Supervisor are built and tested live. Next: the Supervisor A/B against the router.
+**Status as of 2026-11-18:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 in progress: the minimal code-only Estimator is merged and tested live. Module 5 in progress: `graph.py` (LangGraph lock-day workflow with parallel Outreach and a coordinator approval pause), code-only Intake, the rule-based router, the fixed-reminder baseline, merged delivery and the LLM Supervisor are built and tested live. The Supervisor A/B against the router is done (63 runs): the Supervisor changed no outcome, so the router stays the default. Next: gated ToT in the Estimator, then the MCP server.
 
 ---
 
@@ -94,6 +94,7 @@ timesheet-exception-agent/
 │   ├── sim/           # clock, personas, synthetic data generator
 │   ├── retrieval/     # policies/*.md, cases.py, embeddings, ingest, search, eval
 │   ├── graph.py       # LangGraph workflow (Week 5)
+│   ├── ab.py          # Supervisor A/B against the router and the baseline
 │   └── mcp_server.py  # Week 4
 └── tests/
 ```
@@ -132,6 +133,7 @@ Triage table (14 in total): `triage`, one row per exception (manager, lock risk 
 - [x] Merged delivery (`tools/outbox.py`): `send_message` queues drafts in graph runs; at the end of the tick, drafts to the same person and channel are merged (router template, or the Supervisor's body) after code checks (every employee in the group named, no one else, no citations, length), else sent separately; one reply to a merged message is filed on each exception, and `check_replies` marks it
 - [x] Leave replies: Outreach tool `record_manager_leave` (tied to the manager's reply, audited) and email auto-replies now allow escalation before 9:00 AM, per rule 2; new reply kind `on_leave_teams`
 - [x] LLM Supervisor (`agents/supervisor.py`): coordinates across exceptions over code orchestration, called on events (review), for merges and at the lock (queue); tools `get_overview`, `escalate_group`, `wake_now`, `flag_estimate`, `merge_messages`, `write_queue`, each refusing illegal moves in code; the router's plan stands if a call fails; calls and tokens audited. `tests/test_outbox.py`, `tests/test_supervisor.py`; live runs U1–W2. Full suite 244 passing
+- [x] Supervisor A/B against the router (`ab.py`): 9 scenarios (new reply kind `late`), 3 runs each for the router and Supervisor arms and 1 for the baseline, metrics read from the database at the lock; Outreach tokens now audited per turn; `graph.run_lock_day` shared by the CLI and the A/B. The Supervisor matched the router on every exception in every run at 17% more tokens and twice the wall time, so the router stays the default (`docs/AB_RESULTS.md`, runs AB1–AB63 in `docs/LIVE_RUNS.md`); `tests/test_ab.py`. Full suite 262 passing
 
 ## 5. Evaluation plan
 
@@ -294,3 +296,23 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - Merged as PR #10 (squash, `7e0f2f7`) into `master`.
 - **Next:** the Supervisor A/B against the router on the same scenarios (default, `N-02=silent`, stalling, injection, `use_history`, duplicate, `on_leave_teams`), measuring decisions before the lock, wrong resolutions, messages, coordinator interventions, model calls, tokens and latency. Then gated ToT and the MCP server.
 - **Behind schedule:** on plan for the 2026-11-17 slot. Still to build: the A/B, gated ToT, the MCP server, then the evaluation tables, report and video.
+
+### 2026-11-18 (Module 5)
+- Plan agreed with the user before building: 9 scenarios (the 7 planned, plus `ambiguous`, and a new `late` scenario for the Supervisor's tools), 3 runs per LLM arm, the fixed-reminder baseline as a third arm, and Outreach token tracking. Decision rule fixed before the runs: keep the Supervisor on by default only if it improves decisions before the lock or wrong outcomes in at least one scenario and makes none worse.
+- Work on branch `module5-ab-eval`.
+- Added the `late` reply kind (`sim/personas.py`): approves 95 minutes after the first message, so with `N-02=silent` both of M-03's exceptions are already with the coordinator when the approval arrives.
+- Outreach token use: `agent_act` records each wake's tokens (`token_usage`, shared with the Supervisor) in the `agent_turn` audit entry; `final_report` adds `outreach_tokens`.
+- `graph.py`: the CLI's wiring moved into `run_lock_day()`, used by the CLI and the A/B script.
+- Added `ab.py`: scenarios with expected statuses at the lock, from the business rules; metrics read from the database at the approval pause (decided, wrong outcomes, wrongful approvals, hand-offs, messages, deliveries, escalations, turns, tokens, Supervisor actions, refused merges, wall time); JSON-lines output; `--summary` writes the tables. `tests/test_ab.py` (18). Full suite 262 passing.
+- Ran the A/B while the user was away, as agreed: pass 1 (27 runs) checked first, then passes 2 and 3 (36 runs). 63 runs, no failures, $2.13. Results in `docs/AB_RESULTS.md`; runs AB1–AB63 in `docs/LIVE_RUNS.md`; raw rows in `docs/ab/runs.jsonl`.
+  - Router and Supervisor: the same status on every exception in every run (57 decisions, 0 wrong outcomes, 0 wrongful approvals, 15 hand-offs over the 9 scenarios). The Supervisor never used `escalate_group` or `wake_now`; it cost about 17% more tokens and doubled wall time.
+  - Agent against baseline: 57 decisions against 25, 0 wrong outcomes against wrong outcomes in all 9 baseline runs, 0 wrongful approvals against 11, and 100 messages against 172.
+  - Decision: the router stays the default; the Supervisor stays behind `--supervisor` as the documented experiment.
+- Not committed yet; no PR opened.
+- Open:
+  - The Supervisor may matter at a larger scale (20–30 exceptions, manager facts arriving at different times); not tested.
+  - Prompt caching would cut Outreach cost (most input is the same prompt, tools and policy on every turn); not changed, to keep the A/B comparable.
+  - "Wrongful approval" relies on the simulator's approval wording.
+- **Next:** gated ToT in the Estimator, then the MCP server. Thursday: evaluation tables, report and video.
+- **Behind schedule:** the A/B is done on the 2026-11-18 slot; gated ToT and the MCP server are still to build today.
+
