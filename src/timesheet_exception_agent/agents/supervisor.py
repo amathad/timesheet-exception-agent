@@ -25,7 +25,12 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 from psycopg.types.json import Jsonb
 
-from timesheet_exception_agent.agents.outreach import WAITING, Wake, default_model
+from timesheet_exception_agent.agents.outreach import (
+    WAITING,
+    Wake,
+    default_model,
+    token_usage,
+)
 from timesheet_exception_agent.agents.router import Router
 from timesheet_exception_agent.sim.clock import LOCK, SimClock
 from timesheet_exception_agent.tools.outbox import Group, MergeError, Outbox
@@ -438,11 +443,7 @@ class Supervisor:
         except Exception as e:  # noqa: BLE001 - any failure: the router's plan stands
             self._audit_call(phase, f"failed: {type(e).__name__}: {e}"[:500], {}, ok=False)
             return False
-        usage = {"input_tokens": 0, "output_tokens": 0}
-        for m in result["messages"]:
-            meta = getattr(m, "usage_metadata", None) or {}
-            usage["input_tokens"] += meta.get("input_tokens", 0)
-            usage["output_tokens"] += meta.get("output_tokens", 0)
+        usage = token_usage(result["messages"])
         summary = result["messages"][-1].text.strip() or "(no summary)"
         self._audit_call(phase, summary, usage, ok=True)
         return True

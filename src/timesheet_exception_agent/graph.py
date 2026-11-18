@@ -29,7 +29,8 @@ Typed state is checkpointed after every step (PostgreSQL in live runs, memory in
 clock, reply simulator and connections are runtime objects, not state, so a run can only be
 resumed in the process that started it: enough for the approval pause.
 
-Run a live lock morning (reseeds the database; needs ANTHROPIC_API_KEY unless --baseline):
+Run a live lock morning (reseeds the database; needs ANTHROPIC_API_KEY unless --baseline;
+the A/B script ab.py runs the same morning through run_lock_day):
     uv run python -m timesheet_exception_agent.graph [--baseline] [--supervisor]
         [--sequential | --parallel N] [--duplicate] [--override PERSON=KIND]
         [--no-retrieval] [--decisions FILE]
@@ -184,11 +185,13 @@ def build_graph(rt: Runtime, checkpointer=None):
             with tools.scoped(wake.exception_id):
                 summary = act(wake)
             seconds = round(time.perf_counter() - started, 2)
+            # Token use, when the turn used a model (the baseline has none).
+            usage = getattr(act, "last_usage", None) or {}
             tools.audit(
                 "agent_turn",
                 wake.exception_id,
                 summary,
-                {"wake": wake.reason, "seconds": seconds},
+                {"wake": wake.reason, "seconds": seconds, **usage},
                 actor=DRIVER,
             )
             conn.commit()
@@ -302,8 +305,10 @@ def final_report(conn) -> dict:
         "SELECT count(*), count(DISTINCT coalesce(batch_id::text, 'm' || id))"
         " FROM messages WHERE direction = 'sent'"
     ).fetchone()
-    turns, turn_seconds = conn.execute(
-        "SELECT count(*), coalesce(sum((details->>'seconds')::numeric), 0)"
+    turns, turn_seconds, out_in, out_out = conn.execute(
+        "SELECT count(*), coalesce(sum((details->>'seconds')::numeric), 0),"
+        " coalesce(sum((details->>'input_tokens')::int), 0),"
+        " coalesce(sum((details->>'output_tokens')::int), 0)"
         " FROM audit_log WHERE action = 'agent_turn'"
     ).fetchone()
     calls, tokens_in, tokens_out = conn.execute(
@@ -333,6 +338,7 @@ def final_report(conn) -> dict:
         "deliveries": batches,  # messages people actually received
         "agent_turns": turns,
         "agent_turn_seconds": float(turn_seconds),
+        "outreach_tokens": {"input": out_in, "output": out_out},
         "supervisor_calls": calls,
         "supervisor_tokens": {"input": tokens_in, "output": tokens_out},
         "estimates": estimates,
@@ -367,30 +373,119 @@ def ask_decisions(queue: list[dict]) -> list[dict]:
     return out
 
 
+def run_lock_day(
+    conn,
+    saver,
+    *,
+    baseline: bool = False,
+    supervisor: bool = False,
+    duplicate: bool = False,
+    overrides: dict | None = None,
+    use_retrieval: bool = True,
+    parallel: int = DEFAULT_PARALLEL,
+    model=None,
+    embedder=None,
+    decide: Callable[[list[dict]], list[dict]] | None = None,
+    on_lock: Callable[[], None] | None = None,
+    show: Callable[[dict], None] | None = None,
+    details: dict | None = None,
+) -> dict:
+    """Reseed and run one live lock morning through the graph; return what happened.
+
+    `decide(queue)` answers the approval pause (no answers if None); `on_lock()` runs at the
+    pause, before any decision is applied, so callers can read the database as it stood at
+    the lock; `show(chunk)` sees every graph update. `model` and `embedder` are shared across
+    runs by the caller. Used by the CLI below and by the A/B script (ab.py).
+    """
+    import uuid
+
+    from langgraph.types import Command
+
+    from timesheet_exception_agent.agents.baseline import FixedReminderBaseline
+    from timesheet_exception_agent.agents.estimator import Estimator
+    from timesheet_exception_agent.agents.outreach import agent_act, build_agent
+    from timesheet_exception_agent.agents.supervisor import Supervisor
+    from timesheet_exception_agent.db.connection import get_conn
+    from timesheet_exception_agent.sim.personas import load_personas
+    from timesheet_exception_agent.sim.seed import add_duplicate, seed
+
+    seed(conn)
+    if duplicate:
+        add_duplicate(conn)
+    conn.commit()
+    clock = SimClock()
+    sim = ReplySimulator(load_personas(conn), overrides=overrides or {})
+
+    if baseline:
+        def make_act(tools):
+            return FixedReminderBaseline(tools)
+    else:
+        retrieval_embedder = embedder if use_retrieval else None
+
+        def make_act(tools):
+            retrieval = None
+            if retrieval_embedder is not None:
+                from timesheet_exception_agent.tools.retrieval import RetrievalTools
+
+                retrieval = RetrievalTools(
+                    tools.conn, clock, retrieval_embedder, current_exception=lambda: tools.scope
+                )
+            agent = build_agent(tools, model=model, retrieval=retrieval)
+            return agent_act(agent, clock, retrieval)
+
+    supervisor_factory = None
+    if supervisor:
+        def supervisor_factory(conn, clock, router, outbox):
+            return Supervisor(conn, clock, router, outbox, model=model)
+
+    rt = make_runtime(
+        conn, get_conn, clock, sim, make_act, Estimator(conn, clock),
+        supervisor_factory, details,
+    )
+    graph = build_graph(rt, checkpointer=saver)
+    thread = run_config(f"lockday-{uuid.uuid4().hex[:8]}", parallel)
+    started = time.perf_counter()
+    for chunk in graph.stream({}, thread, stream_mode="updates"):
+        if "__interrupt__" in chunk:
+            break
+        if show:
+            show(chunk)
+    morning_seconds = time.perf_counter() - started
+    if on_lock:
+        on_lock()
+    state = graph.get_state(thread)
+    queue = []
+    if state.next == ("approve",):
+        queue = state.values["queue"]
+        answers = decide(queue) if decide else []
+        for chunk in graph.stream(Command(resume=answers), thread, stream_mode="updates"):
+            if show:
+                show(chunk)
+        state = graph.get_state(thread)
+    return {
+        "thread": thread["configurable"]["thread_id"],
+        "morning_seconds": morning_seconds,
+        "queue": queue,
+        "decisions": state.values.get("decisions", []),
+        "report": state.values["report"],
+    }
+
+
 if __name__ == "__main__":
     import argparse
     import json
     import os
     import sys
-    import uuid
 
     from dotenv import load_dotenv
     from langgraph.checkpoint.postgres import PostgresSaver
-    from langgraph.types import Command
 
-    from timesheet_exception_agent.agents.baseline import FixedReminderBaseline
-    from timesheet_exception_agent.agents.estimator import Estimator
     from timesheet_exception_agent.agents.outreach import (
-        agent_act,
-        build_agent,
         default_model,
         model_settings,
         parse_overrides,
     )
-    from timesheet_exception_agent.agents.supervisor import Supervisor
     from timesheet_exception_agent.db.connection import get_conn
-    from timesheet_exception_agent.sim.personas import load_personas
-    from timesheet_exception_agent.sim.seed import add_duplicate, seed
 
     parser = argparse.ArgumentParser(description="Run one simulated lock morning as a graph.")
     parser.add_argument("--baseline", action="store_true", help="fixed-reminder baseline, no model")
@@ -439,122 +534,94 @@ if __name__ == "__main__":
     if overrides:
         print("Overrides: " + ", ".join(f"{p}={k}" for p, k in overrides.items()))
 
+    def show(chunk):
+        for node, update in chunk.items():
+            if not update:
+                continue
+            if node == "intake":
+                i = update["intake"]
+                print(
+                    f"Intake: {i['loaded']} loaded, duplicates {i['duplicates'] or 'none'},"
+                    f" {i['managers']} managers, risk {i['risk']}"
+                )
+            elif node == "outreach":
+                for e in update["log"]:
+                    print(
+                        f"{e['time']}  #{e['exception_id']:<2} {e['wake']:<14}"
+                        f" ({e['seconds']:.0f}s) {e['summary']}"
+                    )
+            elif node == "deliver":
+                for d in update.get("deliveries", []):
+                    if d["merged_by"]:
+                        print(
+                            f"{d['time']}  merged by {d['merged_by']}: one {d['channel']}"
+                            f" to {d['person_id']} for {d['exceptions']}"
+                        )
+            elif node == "lock":
+                print(f"\nAt lock, handed to coordinator: {update['handed_off_at_lock'] or 'none'}")
+
+    def decide(queue):
+        print(f"\nApproval queue ({len(queue)} proposals):")
+        if args.decisions:
+            with open(args.decisions, encoding="utf-8") as f:
+                return json.load(f)
+        return ask_decisions(queue)
+
     with get_conn() as conn, PostgresSaver.from_conn_string(
         os.environ["DATABASE_URL"]
     ) as saver:
         saver.setup()
-        seed(conn)
-        if args.duplicate:
-            add_duplicate(conn)
-        conn.commit()
-        clock = SimClock()
-        sim = ReplySimulator(load_personas(conn), overrides=overrides)
-        model = default_model() if needs_model else None
+        embedder = None
+        if use_retrieval:
+            from timesheet_exception_agent.retrieval.embeddings import FastEmbedder
+            from timesheet_exception_agent.retrieval.search import (
+                CASES,
+                POLICIES,
+                RetrievalError,
+                require_corpus,
+            )
 
-        if args.baseline:
-            def make_act(tools):
-                return FixedReminderBaseline(tools)
-        else:
-            embedder = None
-            if use_retrieval:
-                from timesheet_exception_agent.retrieval.embeddings import FastEmbedder
-                from timesheet_exception_agent.retrieval.search import (
-                    CASES,
-                    POLICIES,
-                    RetrievalError,
-                    require_corpus,
-                )
-                from timesheet_exception_agent.tools.retrieval import RetrievalTools
+            embedder = FastEmbedder()
+            try:
+                for corpus in (POLICIES, CASES):
+                    require_corpus(conn, corpus, embedder.name)
+            except RetrievalError as e:
+                raise SystemExit(str(e)) from e
+            details["retrieval"] = embedder.name
 
-                embedder = FastEmbedder()
-                try:
-                    for corpus in (POLICIES, CASES):
-                        require_corpus(conn, corpus, embedder.name)
-                except RetrievalError as e:
-                    raise SystemExit(str(e)) from e
-                details["retrieval"] = embedder.name
-
-            def make_act(tools):
-                retrieval = None
-                if embedder is not None:
-                    retrieval = RetrievalTools(
-                        tools.conn, clock, embedder, current_exception=lambda: tools.scope
-                    )
-                agent = build_agent(tools, model=model, retrieval=retrieval)
-                return agent_act(agent, clock, retrieval)
-
-        supervisor_factory = None
-        if args.supervisor:
-            def supervisor_factory(conn, clock, router, outbox):
-                return Supervisor(conn, clock, router, outbox, model=model)
-
-        rt = make_runtime(
-            conn, get_conn, clock, sim, make_act, Estimator(conn, clock),
-            supervisor_factory, details,
+        result = run_lock_day(
+            conn,
+            saver,
+            baseline=args.baseline,
+            supervisor=args.supervisor,
+            duplicate=args.duplicate,
+            overrides=overrides,
+            use_retrieval=use_retrieval,
+            parallel=parallel,
+            model=default_model() if needs_model else None,
+            embedder=embedder,
+            decide=decide,
+            show=show,
+            details=details,
         )
-        graph = build_graph(rt, checkpointer=saver)
-        thread = run_config(f"lockday-{uuid.uuid4().hex[:8]}", parallel)
-        print(f"Thread: {thread['configurable']['thread_id']}\n")
-        started = time.perf_counter()
-
-        def show(chunk):
-            for node, update in chunk.items():
-                if not update:
-                    continue
-                if node == "intake":
-                    i = update["intake"]
-                    print(
-                        f"Intake: {i['loaded']} loaded, duplicates {i['duplicates'] or 'none'},"
-                        f" {i['managers']} managers, risk {i['risk']}"
-                    )
-                elif node == "outreach":
-                    for e in update["log"]:
-                        print(
-                            f"{e['time']}  #{e['exception_id']:<2} {e['wake']:<14}"
-                            f" ({e['seconds']:.0f}s) {e['summary']}"
-                        )
-                elif node == "deliver":
-                    for d in update.get("deliveries", []):
-                        if d["merged_by"]:
-                            print(
-                                f"{d['time']}  merged by {d['merged_by']}: one {d['channel']}"
-                                f" to {d['person_id']} for {d['exceptions']}"
-                            )
-                elif node == "lock":
-                    print(f"\nAt lock, handed to coordinator: {update['handed_off_at_lock'] or 'none'}")
-
-        for chunk in graph.stream({}, thread, stream_mode="updates"):
-            if "__interrupt__" in chunk:
-                break
-            show(chunk)
-        morning_seconds = time.perf_counter() - started
-        state = graph.get_state(thread)
-        if state.next == ("approve",):
-            queue = state.values["queue"]
-            print(f"\nApproval queue ({len(queue)} proposals):")
-            if args.decisions:
-                with open(args.decisions, encoding="utf-8") as f:
-                    answers = json.load(f)
-            else:
-                answers = ask_decisions(queue)
-            for chunk in graph.stream(Command(resume=answers), thread, stream_mode="updates"):
-                show(chunk)
-            state = graph.get_state(thread)
-            for d in state.values.get("decisions", []):
-                print(f"  decision: {d}")
-        report = state.values["report"]
+        print(f"Thread: {result['thread']}")
+        for d in result["decisions"]:
+            print(f"  decision: {d}")
+        report = result["report"]
         print("\nFinal statuses:")
         for x in report["exceptions"]:
             print(f"  #{x['exception_id']} {x['employee_id']}  {x['status']:<20} risk {x['risk']}")
         print(
             f"Messages: {report['messages_sent']} per exception, {report['deliveries']} delivered."
             f"  Outreach turns: {report['agent_turns']}"
-            f" ({report['agent_turn_seconds']:.0f}s of model time)."
+            f" ({report['agent_turn_seconds']:.0f}s of model time,"
+            f" tokens in {report['outreach_tokens']['input']},"
+            f" out {report['outreach_tokens']['output']})."
             f"  Supervisor calls: {report['supervisor_calls']}"
             f" (tokens in {report['supervisor_tokens']['input']},"
             f" out {report['supervisor_tokens']['output']})."
         )
-        print(f"Wall time to the lock: {morning_seconds:.0f}s")
+        print(f"Wall time to the lock: {result['morning_seconds']:.0f}s")
         for e in report["estimates"]:
             print(
                 f"  estimate #{e['exception_id']} {e['path']:<14} {e['hours']:g} h"

@@ -77,6 +77,14 @@ REPLIES: dict[str, tuple[int, str | tuple[str, ...]] | None] = {
             " my manager for anything urgent."
         ),
     ),
+    # A manager who is offline all morning and approves 95 minutes after the first message
+    # (09:35 for an 08:00 message), after the exceptions may already be with the coordinator.
+    # A late approval before the lock must still resolve them and withdraw any proposal
+    # (Module 5 A/B scenario "late").
+    "late": (
+        95,
+        "Sorry for the slow reply, I've been offline all morning. {employee}'s time is approved.",
+    ),
 }
 
 AUTO_REPLY_KINDS = {"on_leave", "no_next_level"}

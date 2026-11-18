@@ -331,6 +331,16 @@ class OutreachDriver:
 REPLY_WAKES = ("new_reply", "escalation_due")
 
 
+def token_usage(messages) -> dict:
+    """Input and output tokens summed over a conversation's model messages."""
+    usage = {"input_tokens": 0, "output_tokens": 0}
+    for m in messages:
+        meta = getattr(m, "usage_metadata", None) or {}
+        usage["input_tokens"] += meta.get("input_tokens", 0)
+        usage["output_tokens"] += meta.get("output_tokens", 0)
+    return usage
+
+
 def agent_act(
     agent, clock: SimClock, retrieval: RetrievalTools | None = None
 ) -> Callable[[Wake], str]:
@@ -353,6 +363,8 @@ def agent_act(
             {"messages": [{"role": "user", "content": task}]},
             config={"recursion_limit": MAX_STEPS},
         )
+        # Token use of this wake, for the agent_turn audit entry (graph runs read it).
+        act.last_usage = token_usage(result["messages"])
         # .text keeps only the text blocks; with thinking on, content also holds thinking
         # blocks that would otherwise end up in the summary and the audit log.
         return result["messages"][-1].text.strip() or "(no summary)"
