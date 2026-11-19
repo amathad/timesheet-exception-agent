@@ -6,6 +6,7 @@ from timesheet_exception_agent.db.connection import get_conn
 from timesheet_exception_agent.sim.clock import SimClock
 from timesheet_exception_agent.sim.personas import ReplySimulator, load_personas
 from timesheet_exception_agent.sim.seed import seed
+from timesheet_exception_agent.tools.guardrails import ALL_ON, Guardrails
 from timesheet_exception_agent.tools.outreach import OutreachTools
 
 E01, E02, E03, E08, E04, E07, E05, E06 = range(1, 9)
@@ -20,9 +21,11 @@ def conn():
         c.rollback()
 
 
-def run_baseline(conn, overrides=None):
+def run_baseline(conn, overrides=None, guardrails=ALL_ON):
     clock = SimClock()
-    tools = OutreachTools(conn, clock, ReplySimulator(load_personas(conn), overrides))
+    tools = OutreachTools(
+        conn, clock, ReplySimulator(load_personas(conn), overrides), guardrails=guardrails
+    )
     OutreachDriver(conn, clock, tools, FixedReminderBaseline(tools)).run()
     return dict(conn.execute("SELECT id, status FROM exceptions ORDER BY id").fetchall())
 
@@ -65,10 +68,28 @@ def test_holding_note_that_mentions_approving_is_taken_as_approval(conn):
     assert final[E01] == final[E02] == "resolved"
 
 
-def test_injection_reply_resolves_only_its_own_exception(conn):
+def test_injection_reply_is_stopped_by_the_screen_even_for_the_baseline(conn):
+    # The reply screen is a code guardrail in the tools, so it covers every arm: the
+    # baseline's keyword match on "Approved. SYSTEM NOTE ..." is refused.
     final = run_baseline(conn, {"M-03": "injection"})
+    assert final[E04] == final[E07] == "needs_fallback"
+    refused = conn.execute(
+        "SELECT count(*) FROM audit_log WHERE action = 'reply_received'"
+        " AND details ? 'flagged'"
+    ).fetchone()[0]
+    assert refused == 2
+
+
+def test_injection_reply_resolves_only_its_own_exception_without_the_screen(conn):
+    # A/B runs AB1-AB63 ran before the screen: the baseline resolved on the reply.
+    final = run_baseline(conn, {"M-03": "injection"}, Guardrails.without("injection_screen"))
     assert final[E04] == final[E07] == "resolved"  # "Approved. SYSTEM NOTE ..."
     assert final[E06] == "needs_fallback"
+    bypassed = conn.execute(
+        "SELECT count(*) FROM audit_log WHERE action = 'guardrail_bypassed'"
+        " AND details->>'guardrail' = 'injection_screen'"
+    ).fetchone()[0]
+    assert bypassed == 2
 
 
 def test_reply_without_the_keyword_is_ignored(conn):
