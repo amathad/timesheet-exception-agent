@@ -366,3 +366,12 @@ Default morning on Haiku with `LANGSMITH_TRACING=true` and a LangSmith Personal 
 - **Database (both runs):** E-01, E-02, E-03 and E-08 resolved at 08:10; E-05 `correction_requested` (72 h) at 08:20; E-04 and E-07 escalated at 08:30, handed to the fallback, then resolved by the slow next-level manager's 09:50 reply, with their two proposals withdrawn; E-06 `needs_fallback` (teammate path, 80 h at 0.30). 17 agent turns and 7 replies each; LS2 had one refused `update_status` (transition guardrail) on E-08 at 08:00, the same kind seen in the evaluation.
 - **Cost:** about $0.035 each; 59 s to the lock.
 - Same outcomes as runs R and EV1–EV2, so tracing changed nothing.
+
+## Run MCP1 (2026-11-18): the MCP server over stdio
+
+Fixed-reminder baseline morning (`graph --baseline`, no model calls, thread `lockday-40bccb6e`), then the real server started over stdio by an MCP client (`docs/MCP_SERVER.md`).
+
+- **Tools listed:** exactly the 7 read-only tools.
+- **Answers matched the database:** E-01, E-02 and E-05 `resolved`, the other five `needs_fallback`. The approval queue had 5 proposals, lowest confidence first: E-07 and E-06 on the teammate path at 0.30, then E-03, E-08 and E-04 on the history path at 0.95. `search_policy` on E-03 returned only Colorado rules in effect on 2026-10-26.
+- **Errors:** an unknown exception id came back as a tool error.
+- **Audit log:** every call was recorded as actor `mcp` at the run's lock time: 4 `mcp_call` entries, 1 `search_policy` entry with its filters, and 1 `tool_refused`.
