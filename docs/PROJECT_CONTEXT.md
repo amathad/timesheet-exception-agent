@@ -319,3 +319,23 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
 - **Next:** gated ToT in the Estimator, then the MCP server. Thursday: evaluation tables, report and video.
 - **Behind schedule:** the A/B is done on the 2026-11-18 slot; gated ToT and the MCP server are still to build today.
 
+
+### 2026-11-18 (Modules 5 and 6)
+- Order revised with the user: policy-search filters and gated ToT first (Module 5), then Module 6 (metrics, reply screen, ablation, LangSmith), with the MCP server only if time allows.
+- Policy search: every policy document states `States:`/`Effective:`/`Until:`; `search_policy` and `policy_for_reply` always filter on the employee's state and the simulated date, and audit the filters. Two out-of-scope distractors added; 0 of 19 gold questions put an out-of-scope rule in the top 3 (3 without filters), recall@3 unchanged at 0.84.
+- Gated ToT in the Estimator (`agents/tot.py`) with the Supervisor send-back, closing Checkpoint 5.1; live runs X1–X4.
+- Merged as PR #12 (squash, `09eb6f6`) into `master`.
+- Module 6, on branch `module6-eval`:
+  - `metrics.py`: Checkpoint 6.1 metrics from the database after each run, a scripted known-answer coordinator for calibration, JSON lines in `docs/eval/`, `--summary`, `--ablation`.
+  - `tools/guardrails.py`: deterministic reply screen in place of Rebuff (decided with the user), and guardrail switches that audit `guardrail_bypassed`; every refusal audited as `tool_refused`.
+  - Fix found by the evaluation: a reply to a merged message is matched to the message it answers by id, not only time (a same-tick reminder had made the screen flag a real approval).
+  - 32 live runs (EV1–EV32, $1.27): all targets met; nothing got through in the ablation; Brier 0.373, with the standard-hours confidence too low on this seed (`docs/EVAL_RESULTS.md`).
+  - LangSmith tracing checked live with the user's key (LS1–LS2); fixed the morning trace ending as an error at the approval pause.
+  - Full suite 321 passing.
+- Merged as PR #13 (squash, `01c9337`) into `master`.
+- Open:
+  - The ablation shows the guardrails as backstops only; adversarial scenarios that make the model attempt refused moves were not built.
+  - Confidence placeholders (standard hours 0.30) left unchanged; the report should say so.
+  - Two labelled injections pass the screen by design (no instruction, bulk or secrecy words).
+- **Next:** final report and video (Thursday), then the MCP server if time allows.
+- **Behind schedule:** on plan; the build is done except the MCP server, which is optional.
