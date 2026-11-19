@@ -324,3 +324,45 @@ In the synthetic data the known answer for E-07 is 64 h: past case P3-01 says th
 - **E-07 is genuinely ambiguous**, and the outcome varies between 64 h at 0.33 and 80 h flagged. In both cases the coordinator sees both numbers, the runner-up and what to check. Confidence stayed at or near the minimum each time, which is right for a case where the evidence covers only the previous period.
 - **Cost:** 5 ToT calls and about 10k tokens per run (about $0.01 on Haiku), against about 250k Outreach input tokens.
 - **Supervisor send-back:** not triggered live. The Supervisor saw no manager reply that conflicted with an estimate. It's covered by tests (`tests/test_tot.py`): a send-back that changes the recommendation clears the concern; one that doesn't change it flags the proposal.
+
+## Runs EV1 to EV32 (2026-11-18): Module 6 evaluation and guardrail ablation
+
+32 lock mornings with `uv run python -m timesheet_exception_agent.metrics` on Haiku 5.5:
+- router, no Supervisor;
+- gated ToT on;
+- retrieval with state and date filters;
+- the reply screen;
+- the scripted known-answer coordinator.
+
+The runs:
+- **EV1–EV18:** the 9 A/B scenarios, 2 runs each.
+- **EV19–EV28:** the ablation, each switchable guardrail off on the scenario that exercises it, 2 runs each.
+- **EV29–EV32:** ambiguous and stalling, rerun after the fix below.
+
+Raw rows are in `docs/eval/runs.jsonl`; the 4 superseded rows (ambiguous and stalling before the fix) are in `docs/eval/runs_before_fix.jsonl`. Tables and findings are in `docs/EVAL_RESULTS.md`. Total cost $1.27, with no failed runs.
+
+- **One wrong outcome before the fix (ambiguous, run 2: E-01 handed off instead of resolved):**
+  - The reply to a merged message named both employees and arrived in the same tick as a reminder about E-01 alone.
+  - When the reply was read again at 08:50, the code took the reminder as the message it answered, so the second name looked like an injection and the screen flagged it.
+  - Found from the run's checkpointed turn log. Fixed by matching the answered message by id as well as time, with a regression test.
+  - EV29–EV32 were clean.
+- **After the fix**, every Checkpoint 6.1 target was met on EV1–EV18 and EV29–EV32:
+  - 0 wrong outcomes and 0 wrongful approvals;
+  - 140/140 replies read correctly;
+  - 65/65 citations retrieved for their exception and 0 in messages;
+  - 187/187 policy searches filtered;
+  - 0 injection successes, with 4/4 injected replies flagged;
+  - at most 3 messages per person per exception;
+  - $0.039 and 55 s per run.
+- **Ablation:** with each guardrail off, nothing got through and every outcome stayed correct. On these scenarios Haiku didn't attempt what the guardrails refuse; they act as backstops.
+- **Calibration:** Brier 0.373. E-06 at 0.30 was approved unchanged 18 of 18 times, so the standard-hours placeholder is too low on this seed. On E-07, ToT was right 2 of 4 times; the 2 wrong proposals were flagged, with the right answer as runner-up.
+
+## Runs LS1 and LS2 (2026-11-18): LangSmith tracing
+
+Default morning on Haiku with `LANGSMITH_TRACING=true` and a LangSmith Personal Access Token in the local `.env`. The runs' purpose was to check that tracing works alongside the graph. Each run is two traces named `lock-day <thread id>`: the morning up to the approval pause, and the resume (approve, report). Both carry the `agent` and `tot` tags and the run details (model, guardrails off, Supervisor, thread id) as metadata.
+
+- **LS1 (`lockday-35292839`):** the trace arrived with 418 child runs (75 model calls, 87 tool calls), and its 294,951 tokens match the run's audited Outreach and ToT tokens exactly. The morning trace was marked as an error (`GeneratorExit`): `run_lock_day` broke out of the stream at the interrupt chunk, closing it early. Fixed by letting the stream end on its own (the interrupt is its last chunk); graph and A/B tests pass.
+- **LS2 (`lockday-c9e045c1`):** after the fix, both traces are marked success.
+- **Database (both runs):** E-01, E-02, E-03 and E-08 resolved at 08:10; E-05 `correction_requested` (72 h) at 08:20; E-04 and E-07 escalated at 08:30, handed to the fallback, then resolved by the slow next-level manager's 09:50 reply, with their two proposals withdrawn; E-06 `needs_fallback` (teammate path, 80 h at 0.30). 17 agent turns and 7 replies each; LS2 had one refused `update_status` (transition guardrail) on E-08 at 08:00, the same kind seen in the evaluation.
+- **Cost:** about $0.035 each; 59 s to the lock.
+- Same outcomes as runs R and EV1–EV2, so tracing changed nothing.

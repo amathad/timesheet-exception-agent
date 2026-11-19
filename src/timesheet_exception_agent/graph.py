@@ -33,7 +33,10 @@ Run a live lock morning (reseeds the database; needs ANTHROPIC_API_KEY unless --
 the A/B script ab.py runs the same morning through run_lock_day):
     uv run python -m timesheet_exception_agent.graph [--baseline] [--supervisor]
         [--sequential | --parallel N] [--duplicate] [--override PERSON=KIND]
-        [--no-retrieval] [--decisions FILE]
+        [--no-retrieval] [--no-tot] [--off GUARDRAIL] [--decisions FILE]
+
+With LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env, every run is traced to
+LangSmith (project LANGSMITH_PROJECT), tagged with the run's thread and settings.
 """
 
 import operator
@@ -56,6 +59,7 @@ from timesheet_exception_agent.agents.outreach import OutreachDriver, Wake
 from timesheet_exception_agent.agents.router import Router
 from timesheet_exception_agent.sim.clock import LOCK, SimClock
 from timesheet_exception_agent.sim.personas import ReplySimulator
+from timesheet_exception_agent.tools.guardrails import ALL_ON, Guardrails
 from timesheet_exception_agent.tools.outbox import Outbox
 from timesheet_exception_agent.tools.outreach import DRIVER, OutreachTools
 
@@ -98,6 +102,7 @@ class Runtime:
     gate: ApprovalGate
     supervisor: Any = None
     details: dict = field(default_factory=dict)
+    guardrails: Guardrails = ALL_ON
 
 
 def make_runtime(
@@ -109,10 +114,11 @@ def make_runtime(
     estimator=None,
     supervisor_factory=None,
     details=None,
+    guardrails: Guardrails = ALL_ON,
 ) -> Runtime:
     """Wire the runtime. `make_act(tools)` builds the Outreach turn for one task's tools;
     `supervisor_factory(conn, clock, router, outbox)` builds the Supervisor, if any."""
-    tools = OutreachTools(conn, clock, sim, outbox=True)
+    tools = OutreachTools(conn, clock, sim, outbox=True, guardrails=guardrails)
     intake = Intake(conn, clock)
     router = Router(conn, clock, intake)
     outbox = Outbox(conn, clock, sim)
@@ -137,6 +143,7 @@ def make_runtime(
         gate=ApprovalGate(conn, clock),
         supervisor=supervisor,
         details=details or {},
+        guardrails=guardrails,
     )
 
 
@@ -180,7 +187,9 @@ def build_graph(rt: Runtime, checkpointer=None):
         now = rt.clock.now()
         started = time.perf_counter()
         with rt.connect() as conn:
-            tools = OutreachTools(conn, rt.clock, rt.sim, outbox=True)
+            tools = OutreachTools(
+                conn, rt.clock, rt.sim, outbox=True, guardrails=rt.guardrails
+            )
             act = rt.make_act(tools)
             with tools.scoped(wake.exception_id):
                 summary = act(wake)
@@ -401,6 +410,7 @@ def run_lock_day(
     model=None,
     embedder=None,
     tot: bool = True,
+    guardrails: Guardrails = ALL_ON,
     decide: Callable[[list[dict]], list[dict]] | None = None,
     on_lock: Callable[[], None] | None = None,
     show: Callable[[dict], None] | None = None,
@@ -411,8 +421,9 @@ def run_lock_day(
     `decide(queue)` answers the approval pause (no answers if None); `on_lock()` runs at the
     pause, before any decision is applied, so callers can read the database as it stood at
     the lock; `show(chunk)` sees every graph update. `model` and `embedder` are shared across
-    runs by the caller. Used by the CLI below and by the A/B script (ab.py). `tot` turns on
-    the Estimator's gated Tree-of-Thought (needs `model`; not used by the baseline).
+    runs by the caller. Used by the CLI below, the A/B script (ab.py) and the evaluation
+    (metrics.py). `tot` turns on the Estimator's gated Tree-of-Thought (needs `model`; not
+    used by the baseline). `guardrails` switches one off for the guardrail ablation.
     """
     import uuid
 
@@ -466,15 +477,30 @@ def run_lock_day(
         def supervisor_factory(conn, clock, router, outbox):
             return Supervisor(conn, clock, router, outbox, model=model, estimator=estimator)
 
+    details = {**(details or {}), "guardrails_off": guardrails.off()}
     rt = make_runtime(
         conn, get_conn, clock, sim, make_act, estimator, supervisor_factory, details,
+        guardrails=guardrails,
     )
     graph = build_graph(rt, checkpointer=saver)
     thread = run_config(f"lockday-{uuid.uuid4().hex[:8]}", parallel)
+    # LangSmith (when tracing is on): name and tag the run so traces match the audit log.
+    thread["run_name"] = f"lock-day {thread['configurable']['thread_id']}"
+    thread["tags"] = [
+        "baseline" if baseline else "agent",
+        *(["supervisor"] if supervisor else []),
+        *(["tot"] if reasoner is not None else []),
+        *[f"off:{n}" for n in guardrails.off()],
+    ]
+    thread["metadata"] = {
+        k: v for k, v in details.items() if isinstance(v, str | int | float | bool | list)
+    }
     started = time.perf_counter()
     for chunk in graph.stream({}, thread, stream_mode="updates"):
+        # The interrupt is the stream's last chunk. Let the stream end on its own:
+        # breaking closes it early, and LangSmith then records the morning as an error.
         if "__interrupt__" in chunk:
-            break
+            continue
         if show:
             show(chunk)
     morning_seconds = time.perf_counter() - started
@@ -521,6 +547,11 @@ if __name__ == "__main__":
     parser.add_argument("--override", action="append", default=[], metavar="PERSON=KIND")
     parser.add_argument("--no-retrieval", action="store_true")
     parser.add_argument("--no-tot", action="store_true", help="Estimator without Tree-of-Thought")
+    parser.add_argument(
+        "--off", action="append", default=[], metavar="GUARDRAIL",
+        help="switch a guardrail off (ablation only): scope, citations, escalation_cutoff,"
+        " message_cap, injection_screen",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--sequential", action="store_true", help="one Outreach task at a time")
     mode.add_argument("--parallel", type=int, default=DEFAULT_PARALLEL, metavar="N")
@@ -535,6 +566,10 @@ if __name__ == "__main__":
     except ValueError as e:
         parser.error(str(e))
     parallel = 1 if args.sequential else max(1, args.parallel)
+    try:
+        guardrails = Guardrails.without(*args.off)
+    except ValueError as e:
+        parser.error(str(e))
 
     sys.stdout.reconfigure(encoding="utf-8")
     load_dotenv()
@@ -630,6 +665,7 @@ if __name__ == "__main__":
             model=default_model() if needs_model else None,
             embedder=embedder,
             tot=not args.no_tot,
+            guardrails=guardrails,
             decide=decide,
             show=show,
             details=details,
