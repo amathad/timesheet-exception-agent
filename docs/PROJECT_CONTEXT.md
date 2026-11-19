@@ -340,3 +340,20 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
   - Two labelled injections pass the screen by design (no instruction, bulk or secrecy words).
 - **Next:** final report and video (Thursday), then the MCP server if time allows.
 - **Behind schedule:** on plan; the build is done except the MCP server, which is optional.
+
+### 2026-11-19 (Module 4 MCP server, LangSmith)
+- LangSmith tracing checked live with the user's Personal Access Token (runs LS1–LS2): traces arrive with run names, tags and metadata, and their token counts match the audit log. Fixed the morning trace ending as an error (`GeneratorExit`) at the approval pause. Included in PR #13.
+- Why the MCP server was optional, discussed with the user: it changes no agent behaviour or metric, but Checkpoint 4.1 named it, so a minimal read-only version was built. Plan agreed before building.
+- Work on branch `module4-mcp-server`.
+- Added `mcp_server.py`. It uses the official `mcp` SDK v2, where FastMCP is now `MCPServer`, and runs over stdio.
+  - 7 read-only tools reuse the agents' code. There is no write tool, decided with the user: an MCP client is another model, so the Outreach guardrails and the approval gate stay out of its reach.
+  - Every call is audited as actor `mcp`; refusals as `tool_refused`.
+  - Tool returns are typed `dict[str, Any]` so clients get structured content.
+- `tests/test_mcp_server.py` (9) runs through an in-memory MCP session. Full suite 330 passing.
+- Run MCP1: the server was smoke-checked over stdio after a baseline morning, then connected in the user's Claude Desktop. That install reads its config from `AppData\Local\Claude-Data\…`, not `AppData\Roaming\Claude`. Connection guide in `docs/MCP_SERVER.md`.
+- Merged as PR #14 (squash, `075b32f`) into `master`. All modules are now built.
+- Open:
+  - The MCP server hasn't been exercised by a model in Claude Desktop beyond listing its tools; the user is testing it while recording the demo.
+  - `README.md` is still empty.
+- **Next:** record the demo (agent run in the VS Code terminal, then questions in Claude Desktop over MCP), then the final report and video.
+- **Behind schedule:** on plan; the build is complete, and the report and video are due today (Thu 2026-11-19).
