@@ -3,7 +3,7 @@
 Capstone project for the CMU School of Computer Science program *Agent AI Development for Real World Applications* (Sept–Nov 2026). This file records the problem, the rules the agent must follow, the design decisions made so far, and where the build stands. Update it at the end of each working session.
 
 **Capstone option:** Forecaster
-**Status as of 2026-11-19:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 done: the minimal code-only Estimator is merged and tested live, and a read-only MCP server exposes the run to any MCP client. Module 5 done: `graph.py` (LangGraph lock-day workflow with parallel Outreach and a coordinator approval pause), code-only Intake, the rule-based router, the fixed-reminder baseline, merged delivery and the LLM Supervisor are built and tested live. The Supervisor A/B against the router is done (63 runs): the Supervisor changed no outcome, so the router stays the default. Gated ToT in the Estimator with the Supervisor send-back (closing Checkpoint 5.1) and hard state/date filters on policy search are built and tested live (PR #12). Module 6 built: metrics over the audit log for every Checkpoint 6.1 group, a deterministic reply screen, refusal auditing, guardrail switches and an ablation, and LangSmith tracing (tested live, runs LS1–LS2); evaluated over 32 live runs (`docs/EVAL_RESULTS.md`). `README.md` written. Next (Module 7): the final report and video.
+**Status as of 2026-11-24:** Module 2 done: Outreach agent built and tested live on Claude Haiku 5.5. Module 3 (RAG) done: pgvector hybrid retrieval over policies and past cases, wired into Outreach as cited, audited tools and tested live. Module 4 done: the minimal code-only Estimator is merged and tested live, and a read-only MCP server exposes the run to any MCP client. Module 5 done: `graph.py` (LangGraph lock-day workflow with parallel Outreach and a coordinator approval pause), code-only Intake, the rule-based router, the fixed-reminder baseline, merged delivery and the LLM Supervisor are built and tested live. The Supervisor A/B against the router is done (63 runs): the Supervisor changed no outcome, so the router stays the default. Gated ToT in the Estimator with the Supervisor send-back (closing Checkpoint 5.1) and hard state/date filters on policy search are built and tested live (PR #12). Module 6 built: metrics over the audit log for every Checkpoint 6.1 group, a deterministic reply screen, refusal auditing, guardrail switches and an ablation, and LangSmith tracing (tested live, runs LS1–LS2); evaluated over 32 live runs (`docs/EVAL_RESULTS.md`). `README.md` written. Module 7 done: the repo is public, the MCP server was tested from Claude Desktop, and the final report with the presentation and elevator-pitch videos was submitted by the 2026-11-23 deadline.
 
 ---
 
@@ -112,7 +112,7 @@ Triage table (14 in total): `triage`, one row per exception (manager, lock risk 
 ## 4. Build status
 
 - [x] Checkpoint 1.1 written (745 words)
-- [x] Repo created with uv and pushed to GitHub (private)
+- [x] Repo created with uv and pushed to GitHub (private; made public for grading by 2026-11-23)
 - [x] Docker Desktop and WSL 2 set up; PostgreSQL + pgvector container running
 - [x] Load `schema.sql` and confirm 10 tables
 - [x] Verify Python connection (`uv run python -m timesheet_exception_agent.db.connection`)
@@ -360,3 +360,14 @@ Failure cases to simulate: manager on leave with no next-level manager, conflict
   - The README's clone line still says `<this repo>`; fill it in once the sharing option is chosen.
 - **Next:** Module 7, in a new session: record the demo (agent run in the VS Code terminal, then questions in Claude Desktop over MCP), the final report and the video, and share the repo with the graders.
 - **Behind schedule:** on plan; the build is complete, and the report and video are due today (Thu 2026-11-19).
+
+### 2026-11-24 (Module 7)
+- README clone step now uses the GitHub URL (`https://github.com/amathad/timesheet-exception-agent.git`), closing the 2026-11-19 open item. The `<path to this repo>` placeholders in `docs/MCP_SERVER.md` stay, since they stand for each reader's local clone. Committed directly to `master` (`b8ce68b`) and pushed.
+- Done by the user outside this session, by the Mon 2026-11-23 deadline:
+  - the repo was made public for the graders;
+  - the MCP server was tested from Claude Desktop against lock-day runs, with the coordinator's questions as prompts;
+  - the final report was submitted, with a document linking the presentation video and the elevator pitch, both uploaded to YouTube. The two links are in the README's Videos section.
+- No merges; no code changes.
+- Open: none.
+- **Next:** nothing left to build; the final session is Wed 2026-11-25.
+- **Behind schedule:** no; the complete project was submitted by the course deadline.

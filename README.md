@@ -6,6 +6,11 @@ Capstone project for the Carnegie Mellon University School of Computer Science p
 
 > **All data is synthetic.** The workflow was described by a practicing payroll coordinator; no names, reports or records from any employer are used.
 
+## Videos
+
+- [Elevator pitch](https://youtu.be/7Vl_zz7wNVg)
+- [Complete presentation](https://youtu.be/NPn1hBwU708)
+
 ## The problem
 
 Before each payroll, an exception report lists every employee whose time is unsubmitted or unapproved. A coordinator covering about 3 states works 20–30 of these per payroll, under a hard deadline: timesheets lock at **10:00 AM Monday**. Anything left open becomes a retro adjustment on a later paycheck.
