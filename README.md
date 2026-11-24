@@ -67,7 +67,7 @@ From 63 A/B runs and 32 evaluation runs on Claude Haiku 5.5 (details in [`docs/A
 Requirements: Windows/macOS/Linux, [uv](https://docs.astral.sh/uv/), Docker, and a Claude API key from the [Claude Console](https://console.anthropic.com) (not covered by a Claude Pro subscription). The `--baseline` run needs no key.
 
 ```powershell
-git clone <this repo>
+git clone https://github.com/amathad/timesheet-exception-agent.git
 cd timesheet-exception-agent
 copy .env.example .env      # then set POSTGRES_PASSWORD, DATABASE_URL and ANTHROPIC_API_KEY
 docker compose up -d        # PostgreSQL 16 + pgvector, container payroll-pg
